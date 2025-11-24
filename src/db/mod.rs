@@ -34,6 +34,24 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // 建立分享連結表格
+    // Create share_links table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS share_links (
+            id TEXT PRIMARY KEY,
+            file_path TEXT NOT NULL,
+            password_hash TEXT,
+            expires_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            creator_id INTEGER,
+            FOREIGN KEY(creator_id) REFERENCES users(id)
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
     println!("Database initialized successfully");
     Ok(pool)
 }

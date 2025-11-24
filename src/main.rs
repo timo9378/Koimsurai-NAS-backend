@@ -10,6 +10,7 @@ mod models;
 mod routes;
 mod state;
 mod utils;
+mod error;
 
 use crate::state::AppState;
 
@@ -39,7 +40,7 @@ async fn main() {
         storage_path,
     };
 
-    let app = routes::create_router(state);
+    let app = routes::create_router(state).await;
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     tracing::info!("RustNAS Server running on http://0.0.0.0:3000");

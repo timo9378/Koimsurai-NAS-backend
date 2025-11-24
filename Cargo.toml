@@ -13,7 +13,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros", "chrono"] }
 argon2 = "0.5"
-tower-sessions = "0.13"
+tower-sessions = "0.12"
 axum-extra = { version = "0.9", features = ["cookie"] }
 anyhow = "1.0"
 dotenvy = "0.15"
@@ -24,4 +24,9 @@ chrono = { version = "0.4", features = ["serde"] }
 utoipa = { version = "5.0", features = ["axum_extras", "chrono"] }
 utoipa-scalar = { version = "0.2", features = ["axum"] }
 tower = { version = "0.4", features = ["util"] }
+tower-sessions-sqlx-store = { version = "0.13", features = ["sqlite"] }
+mime_guess = "2.0"
+image = "0.25.9"
+sysinfo = "0.37.2"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
 

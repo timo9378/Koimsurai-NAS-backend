@@ -3,6 +3,7 @@ use tower_sessions::Session;
 use crate::models::{RegisterRequest, LoginRequest, User, AuthResponse};
 use crate::state::AppState;
 use crate::utils::hash::{hash_password, verify_password};
+use crate::error::AppError;
 
 pub const AUTH_SESSION_KEY: &str = "authenticated_user_id";
 
@@ -18,7 +19,7 @@ pub const AUTH_SESSION_KEY: &str = "authenticated_user_id";
 pub async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
-) -> impl IntoResponse {
+) -> Result<StatusCode, AppError> {
     // 檢查使用者是否已存在
     // Check if user exists
     let user_exists: Option<(i64,)> = sqlx::query_as(
@@ -27,16 +28,16 @@ pub async fn register(
     .bind(&payload.username)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     if user_exists.is_some() {
-        return Err((StatusCode::CONFLICT, "Username already exists".to_string()));
+        return Err(AppError::Custom(StatusCode::CONFLICT, "Username already exists".to_string()));
     }
 
     // 加密密碼
     // Hash password
     let password_hash = hash_password(&payload.password)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
     // 插入使用者
     // Insert user
@@ -47,7 +48,7 @@ pub async fn register(
     .bind(password_hash)
     .execute(&state.pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     Ok(StatusCode::CREATED)
 }
@@ -65,7 +66,7 @@ pub async fn login(
     State(state): State<AppState>,
     session: Session,
     Json(payload): Json<LoginRequest>,
-) -> impl IntoResponse {
+) -> Result<Json<serde_json::Value>, AppError> {
     // 查詢使用者
     // Find user
     let user: Option<User> = sqlx::query_as(
@@ -74,26 +75,26 @@ pub async fn login(
     .bind(payload.username)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     let user = match user {
         Some(u) => u,
-        None => return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string())),
+        None => return Err(AppError::AuthError("Invalid credentials".to_string())),
     };
 
     // 驗證密碼
     // Verify password
     let is_valid = verify_password(&payload.password, &user.password_hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
     if !is_valid {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
+        return Err(AppError::AuthError("Invalid credentials".to_string()));
     }
 
     // 設定 Session
     // Set session
     session.insert(AUTH_SESSION_KEY, user.id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
     Ok(Json(serde_json::json!({ "message": "Login successful", "user_id": user.id })))
 }
