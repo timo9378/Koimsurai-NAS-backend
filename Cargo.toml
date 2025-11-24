@@ -1,0 +1,27 @@
+[package]
+name = "Koimsurai_NAS"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower-http = { version = "0.5", features = ["fs", "cors", "trace", "limit", "util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros", "chrono"] }
+argon2 = "0.5"
+tower-sessions = "0.13"
+axum-extra = { version = "0.9", features = ["cookie"] }
+anyhow = "1.0"
+dotenvy = "0.15"
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+utoipa = { version = "5.0", features = ["axum_extras", "chrono"] }
+utoipa-scalar = { version = "0.2", features = ["axum"] }
+tower = { version = "0.4", features = ["util"] }
+
