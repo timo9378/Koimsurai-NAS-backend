@@ -8,8 +8,10 @@ use tower_sessions_sqlx_store::SqliteStore;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use crate::state::AppState;
-use crate::handlers::{auth, file, share, system, webdav, media};
+use crate::handlers::{auth, file, share, system, webdav, media, trash, permission};
 use crate::middleware::auth::require_auth;
+
+
 
 use crate::models::{RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse};
 use crate::handlers::system::{SystemStatus, DiskInfo};
@@ -64,11 +66,19 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/upload", post(file::upload_file_root))
         .route("/upload/*path", post(file::upload_file))
         .route("/files/*path", axum::routing::delete(file::delete_file))
+        .route("/files/*path", axum::routing::put(file::rename_file))
         .route("/thumbnail/:size/*path", get(file::get_thumbnail))
+
         .route("/share", post(share::create_share_link))
         .route("/system/status", get(system::get_system_status))
         .route("/media/stream", get(media::stream_media))
+        .route("/trash", get(trash::list_trash))
+        .route("/trash/:filename", post(trash::restore_file))
+        .route("/trash", axum::routing::delete(trash::empty_trash))
+        .route("/permissions", post(permission::set_permission))
         .layer(middleware::from_fn(require_auth)); // Protect file routes
+
+
 
     Router::new()
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))

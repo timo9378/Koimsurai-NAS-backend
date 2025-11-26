@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use axum::{
     extract::{State, Path as AxumPath, Multipart, Request, Extension},
     http::StatusCode,
@@ -15,6 +16,40 @@ use crate::utils::image::generate_thumbnails;
 use tower_http::services::ServeFile;
 use tower::util::ServiceExt; // for oneshot
 use std::path::{Path, Component};
+
+#[derive(Deserialize)]
+pub struct RenameRequest {
+    pub new_path: String,
+}
+
+pub async fn rename_file(
+    State(state): State<AppState>,
+    Extension(_user_id): Extension<i64>,
+    AxumPath(path): AxumPath<String>,
+    Json(payload): Json<RenameRequest>,
+) -> Result<StatusCode, AppError> {
+    let old_path = validate_path(&state.storage_path, &path)?;
+    let new_path = validate_path(&state.storage_path, &payload.new_path)?;
+
+    if !old_path.exists() {
+        return Err(AppError::Status(StatusCode::NOT_FOUND));
+    }
+
+    if new_path.exists() {
+        return Err(AppError::Status(StatusCode::CONFLICT));
+    }
+
+    // Ensure parent directory of new path exists
+    if let Some(parent) = new_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).await.map_err(AppError::from)?;
+        }
+    }
+
+    fs::rename(old_path, new_path).await.map_err(AppError::from)?;
+    Ok(StatusCode::OK)
+}
+
 
 // 驗證路徑，防止 Path Traversal
 // Validate path to prevent Path Traversal
@@ -201,17 +236,21 @@ pub async fn upload_file(
             file.write_all(&chunk).await.map_err(AppError::from)?;
         }
 
-        // 生成縮圖 (背景任務)
-        // Generate thumbnails (background task)
-        let storage_path = state.storage_path.clone();
-        let file_path_clone = file_path.clone();
-        tokio::spawn(async move {
-            generate_thumbnails(file_path_clone, storage_path).await;
-        });
+        // 觸發縮圖生成任務
+        // Trigger thumbnail generation job
+        let job = crate::utils::queue::Job::GenerateThumbnail {
+            input_path: file_path.clone(),
+            output_path: file_path.clone(), // Worker will handle the actual thumbnail path
+        };
+
+        if let Err(e) = state.queue.enqueue(job).await {
+            tracing::error!("Failed to enqueue thumbnail job: {}", e);
+        }
     }
 
     Ok(StatusCode::CREATED)
 }
+
 
 // 用於根目錄上傳
 // For root directory upload
