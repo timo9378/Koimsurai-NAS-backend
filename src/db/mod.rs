@@ -52,6 +52,24 @@ pub async fn init_db() -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // 建立權限表格
+    // Create permissions table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            can_read BOOLEAN DEFAULT 0,
+            can_write BOOLEAN DEFAULT 0,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            UNIQUE(user_id, path)
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
     println!("Database initialized successfully");
     Ok(pool)
 }

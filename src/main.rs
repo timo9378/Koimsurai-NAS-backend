@@ -13,6 +13,9 @@ mod utils;
 mod error;
 
 use crate::state::AppState;
+use std::sync::Arc;
+use dav_server::{localfs::LocalFs, DavHandler};
+use crate::utils::queue::{JobQueue, worker};
 
 #[tokio::main]
 async fn main() {
@@ -35,9 +38,24 @@ async fn main() {
         fs::create_dir_all(&storage_path).await.expect("Failed to create storage directory");
     }
 
+    // Initialize Job Queue
+    let (queue, receiver) = JobQueue::new(100);
+    let queue = Arc::new(queue);
+    
+    // Spawn worker
+    tokio::spawn(worker(receiver));
+
+    // Initialize WebDAV
+    let webdav = DavHandler::builder()
+        .filesystem(LocalFs::new(storage_path.clone(), false, false, false))
+        .locksystem(dav_server::memls::MemLs::new())
+        .build_handler();
+
     let state = AppState {
         pool,
         storage_path,
+        queue,
+        webdav,
     };
 
     let app = routes::create_router(state).await;
@@ -46,3 +64,4 @@ async fn main() {
     tracing::info!("RustNAS Server running on http://0.0.0.0:3000");
     axum::serve(listener, app).await.unwrap();
 }
+

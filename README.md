@@ -4,23 +4,29 @@
 
 ## 功能
 
-- **檔案列表 API**: `GET /api/files` 列出存儲目錄中的檔案。
-- **檔案下載**: `GET /files/<filename>` 下載檔案。
-- **CORS 支援**: 允許前端應用程式連接。
+- **檔案管理**: 上傳、下載、刪除、列表。
+- **分享連結**: 建立帶有密碼和過期時間的分享連結。
+- **WebDAV**: 支援 Windows/Mac 掛載 (Z: 槽)。
+- **媒體串流**: 支援影片串流與即時轉檔 (Transcoding)。
+- **權限控制**: 基於使用者的資料夾權限管理。
+- **背景任務**: 支援縮圖生成與轉檔任務隊列。
 
 ## 如何執行
 
-1. 確保已安裝 Rust。
-2. 進入目錄: `cd hello_nas/Koimsurai_NAS`
+1. 確保已安裝 Rust 和 FFmpeg (用於轉檔)。
+2. 設定環境變數 (參考 `.env.example`)。
 3. 執行: `cargo run`
 4. 伺服器將在 `http://localhost:3000` 啟動。
 
-## 測試
+## API
 
-- 打開瀏覽器訪問 `http://localhost:3000/api/files` 查看檔案列表。
-- 訪問 `http://localhost:3000/files/welcome.txt` 下載測試檔案。
+- `GET /api/files`: 列出檔案
+- `GET /api/media/stream?path=...&resolution=1080p`: 影片串流
+- `ANY /webdav`: WebDAV 接口
 
 ## 專案結構
 
-- `src/main.rs`: 主要伺服器程式碼。
-- `storage/`: 存放 NAS 檔案的目錄。
+- `src/handlers/`: API 處理邏輯
+- `src/models/`: 資料結構
+- `src/utils/`: 工具函式 (Queue, Hash, Image)
+- `storage/`: 存放 NAS 檔案的目錄

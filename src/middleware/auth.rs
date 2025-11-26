@@ -14,9 +14,12 @@ pub async fn require_auth(
 ) -> Result<Response, StatusCode> {
     let user_id: Option<i64> = session.get(AUTH_SESSION_KEY).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if user_id.is_some() {
+    if let Some(user_id) = user_id {
+        let mut request = request;
+        request.extensions_mut().insert(user_id);
         Ok(next.run(request).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
 }
+

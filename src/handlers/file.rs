@@ -1,9 +1,10 @@
 use axum::{
-    extract::{State, Path as AxumPath, Multipart, Request},
+    extract::{State, Path as AxumPath, Multipart, Request, Extension},
     http::StatusCode,
     Json,
     response::IntoResponse,
 };
+
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use std::path::PathBuf;
@@ -57,9 +58,27 @@ fn validate_path(base: &Path, user_path: &str) -> Result<PathBuf, AppError> {
 )]
 pub async fn list_files(
     State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<Vec<FileInfo>>, AppError> {
+    // Check permissions
+    let has_permission = sqlx::query_scalar::<_, bool>(
+        "SELECT can_read FROM permissions WHERE user_id = ? AND path = ?"
+    )
+    .bind(user_id)
+    .bind(&path)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    if let Some(can_read) = has_permission {
+        if !can_read {
+            return Err(AppError::Status(StatusCode::FORBIDDEN));
+        }
+    }
+
     let full_path = validate_path(&state.storage_path, &path)?;
+
 
     if !full_path.exists() {
         return Err(AppError::Status(StatusCode::NOT_FOUND));
@@ -103,9 +122,11 @@ pub async fn list_files(
 )]
 pub async fn list_files_root(
     State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
 ) -> Result<Json<Vec<FileInfo>>, AppError> {
-    list_files(State(state), AxumPath("".to_string())).await
+    list_files(State(state), Extension(user_id), AxumPath("".to_string())).await
 }
+
 
 #[utoipa::path(
     get,

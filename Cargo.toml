@@ -29,4 +29,6 @@ mime_guess = "2.0"
 image = "0.25.9"
 sysinfo = "0.37.2"
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
+dav-server = { version = "0.8.0", features = ["localfs"] }
+headers = "0.4.1"
 
