@@ -2,13 +2,11 @@ use axum::{
     extract::{State, Path as AxumPath, Extension},
     http::StatusCode,
     Json,
-    response::IntoResponse,
 };
 use tokio::fs;
 use crate::state::AppState;
 use crate::error::AppError;
 use crate::models::FileInfo;
-use std::path::Path;
 
 pub async fn list_trash(
     State(state): State<AppState>,

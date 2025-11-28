@@ -8,6 +8,6 @@ pub use user::*;
 pub use file::*;
 pub use share::*;
 pub use permission::*;
-pub use job::*;
+pub use job::{Job, JobStatus, JobUpdate};
 pub use upload::*;
 

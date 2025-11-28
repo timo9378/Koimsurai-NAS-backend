@@ -1,7 +1,6 @@
 use axum::{
     extract::{State, Extension, Json},
     http::StatusCode,
-    response::IntoResponse,
 };
 use crate::state::AppState;
 use crate::error::AppError;

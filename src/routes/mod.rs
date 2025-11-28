@@ -34,6 +34,9 @@ use crate::handlers::media::TimelineGroup;
         file::upload_file,
         file::get_thumbnail,
         file::delete_file,
+        file::batch_delete,
+        file::batch_move,
+        file::batch_copy,
         share::create_share_link,
         share::access_share_link,
         system::get_system_status,
@@ -52,7 +55,7 @@ use crate::handlers::media::TimelineGroup;
         media::get_timeline
     ),
     components(
-        schemas(RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup)
+        schemas(RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest)
     ),
     tags(
         (name = "auth", description = "Authentication endpoints"),
@@ -95,6 +98,9 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/files/*path/versions", get(version::list_file_versions))
         .route("/files/*path/restore/:version_id", post(version::restore_version))
         .route("/thumbnail/:size/*path", get(file::get_thumbnail))
+        .route("/files/batch/delete", post(file::batch_delete))
+        .route("/files/batch/move", post(file::batch_move))
+        .route("/files/batch/copy", post(file::batch_copy))
 
         .route("/share", post(share::create_share_link))
         .route("/system/status", get(system::get_system_status))
