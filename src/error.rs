@@ -1,6 +1,7 @@
 use axum::{response::{IntoResponse, Response}, http::StatusCode, Json};
 use serde_json::json;
 
+#[derive(Debug)]
 pub enum AppError {
     AuthError(String),
     DatabaseError(sqlx::Error),

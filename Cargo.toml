@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = { version = "0.7", features = ["multipart"] }
+axum = { version = "0.7", features = ["multipart", "ws"] }
 tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tower-http = { version = "0.5", features = ["fs", "cors", "trace", "limit", "util"] }
@@ -31,4 +32,10 @@ sysinfo = "0.37.2"
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 dav-server = { version = "0.8.0", features = ["localfs"] }
 headers = "0.4.1"
+notify = "8.2.0"
+walkdir = "2.5.0"
+exif = { package = "kamadak-exif", version = "0.6.1" }
+id3 = "1.16.3"
+mp4 = "0.14.0"
+tantivy = "0.25.0"
 

@@ -33,6 +33,9 @@ pub async fn list_trash(
                     .map(|d| d.as_secs().to_string())
                     .unwrap_or_default(),
                 mime_type: None,
+                metadata: None,
+                tags: vec![],
+                is_starred: false,
             });
         }
     }

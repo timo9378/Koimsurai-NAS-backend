@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::state::AppState;
 use crate::models::FileInfo;
 use crate::error::AppError;
-use crate::utils::image::generate_thumbnails;
+// use crate::utils::image::generate_thumbnails;
 use tower_http::services::ServeFile;
 use tower::util::ServiceExt; // for oneshot
 use std::path::{Path, Component};
@@ -47,13 +47,23 @@ pub async fn rename_file(
     }
 
     fs::rename(old_path, new_path).await.map_err(AppError::from)?;
+
+    // Audit Log
+    let _ = state.audit.log(
+        _user_id,
+        "rename_file",
+        &path,
+        Some(format!("Renamed to {}", payload.new_path)),
+        None
+    ).await;
+
     Ok(StatusCode::OK)
 }
 
 
 // 驗證路徑，防止 Path Traversal
 // Validate path to prevent Path Traversal
-fn validate_path(base: &Path, user_path: &str) -> Result<PathBuf, AppError> {
+pub fn validate_path(base: &Path, user_path: &str) -> Result<PathBuf, AppError> {
     let path = Path::new(user_path);
     let mut full_path = base.to_path_buf();
 
@@ -81,11 +91,25 @@ fn validate_path(base: &Path, user_path: &str) -> Result<PathBuf, AppError> {
     Ok(full_path)
 }
 
+#[derive(Deserialize)]
+pub struct ListFilesQuery {
+    pub sort_by: Option<String>, // name, size, modified
+    pub order: Option<String>,   // asc, desc
+    pub search: Option<String>,
+    pub page: Option<i64>,
+    pub limit: Option<i64>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/files/{path}",
     params(
-        ("path" = String, Path, description = "Directory path")
+        ("path" = String, Path, description = "Directory path"),
+        ("sort_by" = Option<String>, Query, description = "Sort by field"),
+        ("order" = Option<String>, Query, description = "Sort order"),
+        ("search" = Option<String>, Query, description = "Search query"),
+        ("page" = Option<i64>, Query, description = "Page number"),
+        ("limit" = Option<i64>, Query, description = "Items per page")
     ),
     responses(
         (status = 200, description = "List files in directory", body = Vec<FileInfo>)
@@ -95,6 +119,7 @@ pub async fn list_files(
     State(state): State<AppState>,
     Extension(user_id): Extension<i64>,
     AxumPath(path): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<ListFilesQuery>,
 ) -> Result<Json<Vec<FileInfo>>, AppError> {
     // Check permissions
     let has_permission = sqlx::query_scalar::<_, bool>(
@@ -112,35 +137,102 @@ pub async fn list_files(
         }
     }
 
-    let full_path = validate_path(&state.storage_path, &path)?;
+    // Normalize path for DB query (remove trailing slash if any, ensure forward slashes)
+    let normalized_path = path.trim_end_matches('/').replace('\\', "/");
+    let parent_path = if normalized_path.is_empty() { "".to_string() } else { normalized_path };
 
+    let mut sql = String::from("SELECT name, is_dir, size, modified, mime_type FROM files WHERE ");
+    let mut params = Vec::new();
 
-    if !full_path.exists() {
-        return Err(AppError::Status(StatusCode::NOT_FOUND));
+    if let Some(search) = &query.search {
+        sql.push_str("name LIKE ?");
+        params.push(format!("%{}%", search));
+    } else {
+        sql.push_str("parent_path = ?");
+        params.push(parent_path.clone());
     }
 
+    // Sorting
+    let sort_column = match query.sort_by.as_deref() {
+        Some("size") => "size",
+        Some("modified") => "modified",
+        _ => "name", // Default sort by name
+    };
+    
+    let order = match query.order.as_deref() {
+        Some("desc") => "DESC",
+        _ => "ASC",
+    };
+
+    sql.push_str(&format!(" ORDER BY is_dir DESC, {} {}", sort_column, order));
+
+    // Pagination
+    let limit = query.limit.unwrap_or(50);
+    let offset = (query.page.unwrap_or(1) - 1) * limit;
+    
+    sql.push_str(" LIMIT ? OFFSET ?");
+
+    let mut query_builder = sqlx::query_as::<_, (String, bool, i64, chrono::NaiveDateTime, Option<String>)>(&sql);
+    
+    for param in params {
+        query_builder = query_builder.bind(param);
+    }
+    query_builder = query_builder.bind(limit).bind(offset);
+
+    let rows = query_builder.fetch_all(&state.pool).await.map_err(AppError::from)?;
+
     let mut files = Vec::new();
-    let mut entries = fs::read_dir(full_path).await.map_err(AppError::from)?;
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if let Ok(metadata) = entry.metadata().await {
-            let mime_type = if metadata.is_dir() {
-                None
+    for (name, is_dir, size, modified, mime_type) in rows {
+        let metadata = if !is_dir {
+            if let Some(ref mime) = mime_type {
+                let file_path = state.storage_path.join(&parent_path).join(&name);
+                crate::utils::metadata::extract_metadata(&file_path, mime)
             } else {
-                Some(mime_guess::from_path(entry.path()).first_or_octet_stream().to_string())
-            };
+                crate::utils::metadata::FileMetadata::None
+            }
+        } else {
+            crate::utils::metadata::FileMetadata::None
+        };
 
-            files.push(FileInfo {
-                name: entry.file_name().to_string_lossy().to_string(),
-                is_dir: metadata.is_dir(),
-                size: metadata.len(),
-                modified: metadata.modified().ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs().to_string())
-                    .unwrap_or_default(),
-                mime_type,
-            });
-        }
+        // Query tags
+        let file_db_path = if parent_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", parent_path, name)
+        };
+
+        let tags = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT tag_name, color FROM file_tags WHERE user_id = ? AND file_path = ?"
+        )
+        .bind(user_id)
+        .bind(&file_db_path)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::from)?
+        .into_iter()
+        .map(|(name, color)| crate::models::Tag { name, color })
+        .collect();
+
+        // Query starred status
+        let is_starred = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM file_stars WHERE user_id = ? AND file_path = ?)"
+        )
+        .bind(user_id)
+        .bind(&file_db_path)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::from)?;
+
+        files.push(FileInfo {
+            name,
+            is_dir,
+            size: size as u64,
+            modified: modified.and_utc().timestamp().to_string(),
+            mime_type,
+            metadata: Some(metadata),
+            tags,
+            is_starred,
+        });
     }
 
     Ok(Json(files))
@@ -151,6 +243,13 @@ pub async fn list_files(
 #[utoipa::path(
     get,
     path = "/api/files",
+    params(
+        ("sort_by" = Option<String>, Query, description = "Sort by field"),
+        ("order" = Option<String>, Query, description = "Sort order"),
+        ("search" = Option<String>, Query, description = "Search query"),
+        ("page" = Option<i64>, Query, description = "Page number"),
+        ("limit" = Option<i64>, Query, description = "Items per page")
+    ),
     responses(
         (status = 200, description = "List files in root", body = Vec<FileInfo>)
     )
@@ -158,8 +257,9 @@ pub async fn list_files(
 pub async fn list_files_root(
     State(state): State<AppState>,
     Extension(user_id): Extension<i64>,
+    query: axum::extract::Query<ListFilesQuery>,
 ) -> Result<Json<Vec<FileInfo>>, AppError> {
-    list_files(State(state), Extension(user_id), AxumPath("".to_string())).await
+    list_files(State(state), Extension(user_id), AxumPath("".to_string()), query).await
 }
 
 
@@ -230,6 +330,13 @@ pub async fn upload_file(
         
         // 串流寫入檔案，避免佔用過多記憶體
         // Stream write to file to avoid excessive memory usage
+        // Versioning: if file exists, move it to versions
+        if file_path.exists() {
+            if let Err(e) = crate::utils::versioning::create_version(&file_path, &state.storage_path).await {
+                tracing::error!("Failed to create version for {:?}: {:?}", file_path, e);
+            }
+        }
+
         let mut file = fs::File::create(&file_path).await.map_err(AppError::from)?;
 
         while let Some(chunk) = field.chunk().await.map_err(|_| AppError::Status(StatusCode::BAD_REQUEST))? {
@@ -238,12 +345,12 @@ pub async fn upload_file(
 
         // 觸發縮圖生成任務
         // Trigger thumbnail generation job
-        let job = crate::utils::queue::Job::GenerateThumbnail {
+        let job_type = crate::utils::queue::JobType::GenerateThumbnail {
             input_path: file_path.clone(),
             output_path: file_path.clone(), // Worker will handle the actual thumbnail path
         };
 
-        if let Err(e) = state.queue.enqueue(job).await {
+        if let Err(e) = state.queue.enqueue(job_type).await {
             tracing::error!("Failed to enqueue thumbnail job: {}", e);
         }
     }
@@ -324,6 +431,7 @@ pub async fn get_thumbnail(
 )]
 pub async fn delete_file(
     State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
     AxumPath(path): AxumPath<String>,
 ) -> Result<StatusCode, AppError> {
     let full_path = validate_path(&state.storage_path, &path)?;
@@ -358,5 +466,141 @@ pub async fn delete_file(
 
     fs::rename(full_path, final_trash_path).await.map_err(AppError::from)?;
 
+    // Audit Log
+    // We need user_id here, but delete_file signature doesn't have it extracted yet.
+    // Let's update the signature to extract user_id.
+    
+    // Audit Log
+    let _ = state.audit.log(
+        user_id,
+        "delete_file",
+        &path,
+        Some("Moved to trash".to_string()),
+        None
+    ).await;
+
     Ok(StatusCode::OK)
+}
+
+use utoipa::ToSchema;
+
+#[derive(Deserialize, ToSchema)]
+pub struct BatchOperationRequest {
+    pub paths: Vec<String>,
+    pub destination: Option<String>, // For move/copy
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/files/batch/delete",
+    request_body = BatchOperationRequest,
+    responses(
+        (status = 200, description = "Batch delete initiated")
+    )
+)]
+pub async fn batch_delete(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchOperationRequest>,
+) -> Result<StatusCode, AppError> {
+    for path in payload.paths {
+        // Reuse existing delete logic or enqueue job
+        // For simplicity, we'll reuse the logic but ideally this should be a background job
+        let full_path = validate_path(&state.storage_path, &path)?;
+        
+        if !full_path.exists() {
+            continue;
+        }
+
+        let trash_root = state.storage_path.join(".trash");
+        if !trash_root.exists() {
+            fs::create_dir_all(&trash_root).await.map_err(AppError::from)?;
+        }
+
+        let relative_path = full_path.strip_prefix(&state.storage_path).map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let trash_path = trash_root.join(relative_path);
+        
+        if let Some(parent) = trash_path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).await.map_err(AppError::from)?;
+            }
+        }
+        
+        let final_trash_path = if trash_path.exists() {
+            let timestamp = chrono::Utc::now().timestamp();
+            let file_name = trash_path.file_name().unwrap_or_default().to_string_lossy();
+            trash_path.with_file_name(format!("{}.{}", file_name, timestamp))
+        } else {
+            trash_path
+        };
+
+        if let Err(e) = fs::rename(full_path, final_trash_path).await {
+            tracing::error!("Failed to move file to trash: {}", e);
+        }
+    }
+
+    Ok(StatusCode::OK)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/files/batch/move",
+    request_body = BatchOperationRequest,
+    responses(
+        (status = 200, description = "Batch move initiated")
+    )
+)]
+pub async fn batch_move(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchOperationRequest>,
+) -> Result<StatusCode, AppError> {
+    let destination = payload.destination.ok_or(AppError::Status(StatusCode::BAD_REQUEST))?;
+    let dest_path = validate_path(&state.storage_path, &destination)?;
+
+    if !dest_path.exists() {
+        fs::create_dir_all(&dest_path).await.map_err(AppError::from)?;
+    }
+
+    for path in payload.paths {
+        let src_path = validate_path(&state.storage_path, &path)?;
+        if !src_path.exists() {
+            continue;
+        }
+
+        let file_name = src_path.file_name().ok_or(AppError::Status(StatusCode::BAD_REQUEST))?;
+        let target_path = dest_path.join(file_name);
+
+        if let Err(e) = fs::rename(src_path, target_path).await {
+             tracing::error!("Failed to move file: {}", e);
+        }
+    }
+
+    Ok(StatusCode::OK)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/files/batch/copy",
+    request_body = BatchOperationRequest,
+    responses(
+        (status = 200, description = "Batch copy initiated")
+    )
+)]
+pub async fn batch_copy(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchOperationRequest>,
+) -> Result<StatusCode, AppError> {
+    let destination = payload.destination.ok_or(AppError::Status(StatusCode::BAD_REQUEST))?;
+    
+    // Enqueue copy job
+    let job_type = crate::utils::queue::JobType::CopyFiles {
+        paths: payload.paths,
+        destination,
+    };
+
+    state.queue.enqueue(job_type).await.map_err(|e| {
+        tracing::error!("Failed to enqueue copy job: {}", e);
+        AppError::Status(StatusCode::INTERNAL_SERVER_ERROR)
+    })?;
+
+    Ok(StatusCode::ACCEPTED)
 }
