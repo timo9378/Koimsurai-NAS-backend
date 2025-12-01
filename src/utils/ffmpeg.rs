@@ -267,10 +267,15 @@ mod tests {
     
     #[test]
     fn test_gpu_from_env() {
-        std::env::set_var("FFMPEG_GPU_ACCEL", "nvidia");
+        // SAFETY: This test runs in a single thread and we're only setting env vars for testing
+        unsafe {
+            std::env::set_var("FFMPEG_GPU_ACCEL", "nvidia");
+        }
         assert_eq!(GpuAcceleration::from_env(), GpuAcceleration::Nvidia);
         
-        std::env::set_var("FFMPEG_GPU_ACCEL", "none");
+        unsafe {
+            std::env::set_var("FFMPEG_GPU_ACCEL", "none");
+        }
         assert_eq!(GpuAcceleration::from_env(), GpuAcceleration::None);
     }
 }
