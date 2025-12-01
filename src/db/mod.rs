@@ -4,8 +4,8 @@ use anyhow::Result;
 
 // 初始化資料庫連線與表格
 // Initialize database connection and tables
-pub async fn init_db() -> Result<Pool<Sqlite>> {
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
+    let database_url = database_url.unwrap_or_else(|| env::var("DATABASE_URL").expect("DATABASE_URL must be set"));
     
     // 如果資料庫檔案不存在，則建立它
     // Create database file if it doesn't exist
