@@ -24,6 +24,12 @@ pub enum JobType {
         target_height: u32,   // e.g., 720 or 1080
         bitrate_kbps: u32,    // e.g., 2000 (2Mbps)
     },
+    /// 生成 HLS 串流檔案 (.m3u8 + .ts segments)
+    GenerateHls {
+        input_path: PathBuf,
+        output_dir: PathBuf,
+        quality: String,      // e.g., "1080p", "720p", "480p", "all"
+    },
     CopyFiles {
         paths: Vec<String>,
         destination: String,
@@ -39,6 +45,7 @@ impl ToString for JobType {
             JobType::Transcode { .. } => "transcode".to_string(),
             JobType::GenerateThumbnail { .. } => "generate_thumbnail".to_string(),
             JobType::GenerateVideoProxy { .. } => "generate_video_proxy".to_string(),
+            JobType::GenerateHls { .. } => "generate_hls".to_string(),
             JobType::CopyFiles { .. } => "copy_files".to_string(),
             JobType::IndexFile { .. } => "index_file".to_string(),
         }
@@ -168,6 +175,91 @@ pub async fn worker(mut receiver: mpsc::Receiver<Job>, pool: Pool<Sqlite>, tx: b
                     },
                     Ok(s) => Err(format!("Proxy generation failed with status: {}", s)),
                     Err(e) => Err(format!("Failed to execute ffmpeg for proxy: {}", e)),
+                }
+            }
+            JobType::GenerateHls { input_path, output_dir, quality } => {
+                use crate::utils::ffmpeg::{FfmpegCommand, HlsQuality};
+                
+                // 確保輸出目錄存在
+                match tokio::fs::create_dir_all(&output_dir).await {
+                    Err(e) => {
+                        error!("Failed to create HLS output directory: {}", e);
+                        Err(format!("Failed to create HLS output directory: {}", e))
+                    }
+                    Ok(_) => {
+                        let ffmpeg = FfmpegCommand::new(&input_path.to_string_lossy());
+                        
+                        if quality == "all" {
+                            // 生成所有品質 + master playlist
+                            let qualities = HlsQuality::all_presets();
+                            let mut success = true;
+                            let mut error_msg = String::new();
+                            
+                            for q in &qualities {
+                                let quality_dir = output_dir.join(&q.name);
+                                if let Err(e) = tokio::fs::create_dir_all(&quality_dir).await {
+                                    error!("Failed to create quality dir {:?}: {}", quality_dir, e);
+                                    continue;
+                                }
+                                
+                                let ffmpeg = FfmpegCommand::new(&input_path.to_string_lossy());
+                                let mut cmd = ffmpeg.generate_hls(&quality_dir.to_string_lossy(), q);
+                                
+                                info!("Generating HLS {}: {:?}", q.name, input_path);
+                                
+                                match cmd.status() {
+                                    Ok(s) if s.success() => {
+                                        info!("HLS {} generated successfully", q.name);
+                                    }
+                                    Ok(s) => {
+                                        error!("HLS {} generation failed: {}", q.name, s);
+                                        success = false;
+                                        error_msg = format!("HLS {} failed with status: {}", q.name, s);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to execute ffmpeg for HLS {}: {}", q.name, e);
+                                        success = false;
+                                        error_msg = format!("FFmpeg error for {}: {}", q.name, e);
+                                    }
+                                }
+                            }
+                            
+                            // 生成 master playlist
+                            if success {
+                                if let Err(e) = FfmpegCommand::generate_master_playlist(&output_dir.to_string_lossy(), &qualities) {
+                                    Err(format!("Failed to create master playlist: {}", e))
+                                } else {
+                                    info!("Master playlist created at {:?}", output_dir);
+                                    Ok(())
+                                }
+                            } else {
+                                Err(error_msg)
+                            }
+                        } else {
+                            // 生成單一品質
+                            let hls_quality = HlsQuality::from_name(&quality)
+                                .unwrap_or_else(HlsQuality::preset_720p);
+                            
+                            let quality_dir = output_dir.join(&hls_quality.name);
+                            match tokio::fs::create_dir_all(&quality_dir).await {
+                                Err(e) => Err(format!("Failed to create quality dir: {}", e)),
+                                Ok(_) => {
+                                    let mut cmd = ffmpeg.generate_hls(&quality_dir.to_string_lossy(), &hls_quality);
+                                    
+                                    info!("Generating HLS {}: {:?}", quality, input_path);
+                                    
+                                    match cmd.status() {
+                                        Ok(s) if s.success() => {
+                                            info!("HLS generated successfully: {:?}", output_dir);
+                                            Ok(())
+                                        }
+                                        Ok(s) => Err(format!("HLS generation failed with status: {}", s)),
+                                        Err(e) => Err(format!("Failed to execute ffmpeg for HLS: {}", e)),
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             JobType::CopyFiles { paths, destination } => {

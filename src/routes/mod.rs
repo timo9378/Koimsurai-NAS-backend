@@ -107,8 +107,14 @@ pub async fn create_router(state: AppState) -> Router {
         // 系統管理端點 (適合在 DB 還原後執行)
         .route("/system/verify-consistency", post(system::verify_consistency))
         .route("/system/rescan", post(system::trigger_rescan))
+        // 媒體串流
         .route("/media/stream", get(media::stream_media))
         .route("/media/timeline", get(media::get_timeline))
+        // HLS 串流
+        .route("/media/hls/status", get(media::hls_status))
+        .route("/media/hls/serve", get(media::hls_serve))
+        .route("/media/hls/qualities", get(media::hls_qualities))
+        // 其他
         .route("/trash", get(trash::list_trash))
         .route("/trash/:filename", post(trash::restore_file))
         .route("/trash", axum::routing::delete(trash::empty_trash))

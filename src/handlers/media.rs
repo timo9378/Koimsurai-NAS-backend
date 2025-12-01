@@ -2,14 +2,17 @@ use axum::{
     extract::{State, Query, Extension},
     response::{IntoResponse, Response},
     body::Body,
+    http::header,
 };
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 use std::process::Stdio;
+use std::path::PathBuf;
 use crate::state::AppState;
-use crate::utils::ffmpeg::FfmpegCommand;
-use serde::Deserialize;
-use tracing::{info, warn};
+use crate::utils::ffmpeg::{FfmpegCommand, HlsQuality};
+use crate::utils::queue::JobType;
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn, error};
 
 #[derive(Deserialize)]
 pub struct StreamParams {
@@ -243,4 +246,288 @@ pub async fn get_timeline(
     result.sort_by(|a, b| b.date.cmp(&a.date));
 
     Ok(axum::Json(result))
+}
+
+// ============================================================
+//                         HLS 串流
+// ============================================================
+
+/// HLS 快取目錄 (相對於 STORAGE_PATH)
+const HLS_CACHE_DIR: &str = ".hls_cache";
+
+/// HLS 狀態響應
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct HlsStatusResponse {
+    pub status: String,          // "ready", "processing", "not_found"
+    pub qualities: Vec<String>,  // 可用的品質列表
+    pub master_playlist: Option<String>,
+    pub job_id: Option<String>,  // 如果正在處理中，返回 job_id
+}
+
+/// HLS 請求參數
+#[derive(Deserialize)]
+pub struct HlsParams {
+    pub path: String,
+    pub quality: Option<String>,  // "1080p", "720p", "480p", "360p", "all"
+}
+
+/// 計算檔案的 HLS 快取路徑
+fn get_hls_cache_path(storage_path: &std::path::Path, file_path: &str) -> PathBuf {
+    use sha2::{Sha256, Digest};
+    
+    // 使用檔案路徑的 hash 作為快取目錄名稱
+    let mut hasher = Sha256::new();
+    hasher.update(file_path.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let short_hash = &hash[..16]; // 使用前 16 個字元
+    
+    storage_path.join(HLS_CACHE_DIR).join(short_hash)
+}
+
+/// 檢查 HLS 是否已經生成
+fn check_hls_ready(cache_path: &std::path::Path, quality: &str) -> (bool, Vec<String>) {
+    let mut available_qualities = Vec::new();
+    
+    // 檢查 master playlist
+    let master_exists = cache_path.join("master.m3u8").exists();
+    
+    // 檢查各個品質
+    for q in ["1080p", "720p", "480p", "360p"] {
+        let quality_playlist = cache_path.join(q).join("playlist.m3u8");
+        if quality_playlist.exists() {
+            available_qualities.push(q.to_string());
+        }
+    }
+    
+    let ready = if quality == "all" {
+        master_exists && !available_qualities.is_empty()
+    } else {
+        available_qualities.contains(&quality.to_string())
+    };
+    
+    (ready, available_qualities)
+}
+
+/// 檢查 HLS 狀態 / 觸發生成
+#[utoipa::path(
+    get,
+    path = "/api/media/hls/status",
+    params(
+        ("path" = String, Query, description = "Video file path"),
+        ("quality" = Option<String>, Query, description = "Quality: 1080p, 720p, 480p, 360p, or all")
+    ),
+    responses(
+        (status = 200, description = "HLS status", body = HlsStatusResponse),
+        (status = 404, description = "Video file not found")
+    )
+)]
+pub async fn hls_status(
+    State(state): State<AppState>,
+    Query(params): Query<HlsParams>,
+) -> impl IntoResponse {
+    let file_path = state.storage_path.join(&params.path);
+    
+    if !file_path.exists() {
+        return Response::builder()
+            .status(404)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"error": "Video file not found"}"#))
+            .unwrap();
+    }
+    
+    let quality = params.quality.unwrap_or_else(|| "720p".to_string());
+    let cache_path = get_hls_cache_path(&state.storage_path, &params.path);
+    let (ready, available_qualities) = check_hls_ready(&cache_path, &quality);
+    
+    if ready {
+        let master_playlist = if cache_path.join("master.m3u8").exists() {
+            Some(format!("/api/media/hls/serve?path={}&file=master.m3u8", params.path))
+        } else {
+            None
+        };
+        
+        let response = HlsStatusResponse {
+            status: "ready".to_string(),
+            qualities: available_qualities,
+            master_playlist,
+            job_id: None,
+        };
+        
+        Response::builder()
+            .status(200)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&response).unwrap()))
+            .unwrap()
+    } else {
+        // 觸發 HLS 生成任務
+        let job_type = JobType::GenerateHls {
+            input_path: file_path,
+            output_dir: cache_path,
+            quality: quality.clone(),
+        };
+        
+        // 發送任務到 queue
+        let job_id = match state.queue.enqueue(job_type).await {
+            Ok(id) => id,
+            Err(e) => {
+                error!("Failed to queue HLS generation job: {}", e);
+                return Response::builder()
+                    .status(500)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"error": "Failed to queue job"}"#))
+                    .unwrap();
+            }
+        };
+        
+        info!("Queued HLS generation job {} for {} @ {}", job_id, params.path, quality);
+        
+        let response = HlsStatusResponse {
+            status: "processing".to_string(),
+            qualities: available_qualities,
+            master_playlist: None,
+            job_id: Some(job_id),
+        };
+        
+        Response::builder()
+            .status(202)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&response).unwrap()))
+            .unwrap()
+    }
+}
+
+/// HLS 檔案服務參數
+#[derive(Deserialize)]
+pub struct HlsServeParams {
+    pub path: String,       // 原始影片路徑
+    pub file: String,       // HLS 檔案名稱 (e.g., "master.m3u8", "720p/playlist.m3u8", "720p/segment_001.ts")
+}
+
+/// 提供 HLS 檔案 (playlist 或 segment)
+#[utoipa::path(
+    get,
+    path = "/api/media/hls/serve",
+    params(
+        ("path" = String, Query, description = "Original video file path"),
+        ("file" = String, Query, description = "HLS file to serve (e.g., master.m3u8, 720p/playlist.m3u8)")
+    ),
+    responses(
+        (status = 200, description = "HLS file content"),
+        (status = 404, description = "HLS file not found")
+    )
+)]
+pub async fn hls_serve(
+    State(state): State<AppState>,
+    Query(params): Query<HlsServeParams>,
+) -> impl IntoResponse {
+    let cache_path = get_hls_cache_path(&state.storage_path, &params.path);
+    let file_path = cache_path.join(&params.file);
+    
+    // 安全檢查：確保路徑沒有超出快取目錄
+    if !file_path.starts_with(&cache_path) {
+        return Response::builder()
+            .status(403)
+            .body(Body::from("Access denied"))
+            .unwrap();
+    }
+    
+    if !file_path.exists() {
+        return Response::builder()
+            .status(404)
+            .body(Body::from("HLS file not found"))
+            .unwrap();
+    }
+    
+    // 讀取檔案
+    match tokio::fs::read(&file_path).await {
+        Ok(contents) => {
+            let content_type = if params.file.ends_with(".m3u8") {
+                "application/vnd.apple.mpegurl"
+            } else if params.file.ends_with(".ts") {
+                "video/MP2T"
+            } else {
+                "application/octet-stream"
+            };
+            
+            // 對 m3u8 檔案進行路徑重寫
+            let body = if params.file.ends_with(".m3u8") {
+                let content = String::from_utf8_lossy(&contents);
+                let rewritten = rewrite_hls_urls(&content, &params.path, &params.file);
+                Body::from(rewritten)
+            } else {
+                Body::from(contents)
+            };
+            
+            Response::builder()
+                .status(200)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CACHE_CONTROL, "max-age=31536000") // .ts segments 可以長期快取
+                .body(body)
+                .unwrap()
+        }
+        Err(e) => {
+            error!("Failed to read HLS file {:?}: {}", file_path, e);
+            Response::builder()
+                .status(500)
+                .body(Body::from("Failed to read file"))
+                .unwrap()
+        }
+    }
+}
+
+/// 重寫 HLS playlist 中的 URL
+fn rewrite_hls_urls(content: &str, video_path: &str, playlist_file: &str) -> String {
+    let mut result = String::new();
+    let base_dir = if playlist_file.contains('/') {
+        playlist_file.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
+    } else {
+        ""
+    };
+    
+    for line in content.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            result.push_str(line);
+        } else {
+            // 這是一個 segment 或子 playlist 的路徑
+            let file_ref = if base_dir.is_empty() {
+                line.to_string()
+            } else {
+                format!("{}/{}", base_dir, line)
+            };
+            let url = format!("/api/media/hls/serve?path={}&file={}", 
+                urlencoding::encode(video_path),
+                urlencoding::encode(&file_ref));
+            result.push_str(&url);
+        }
+        result.push('\n');
+    }
+    
+    result
+}
+
+/// 取得可用的 HLS 品質列表
+#[utoipa::path(
+    get,
+    path = "/api/media/hls/qualities",
+    responses(
+        (status = 200, description = "Available HLS quality presets")
+    )
+)]
+pub async fn hls_qualities() -> impl IntoResponse {
+    let qualities: Vec<serde_json::Value> = HlsQuality::all_presets()
+        .iter()
+        .map(|q| serde_json::json!({
+            "name": q.name,
+            "width": q.width,
+            "height": q.height,
+            "video_bitrate_kbps": q.video_bitrate_kbps,
+            "audio_bitrate_kbps": q.audio_bitrate_kbps,
+        }))
+        .collect();
+    
+    Response::builder()
+        .status(200)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&qualities).unwrap()))
+        .unwrap()
 }

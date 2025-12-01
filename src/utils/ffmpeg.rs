@@ -231,6 +231,166 @@ impl FfmpegCommand {
         
         cmd
     }
+    
+    /// 建構 HLS 轉檔命令
+    /// 生成 .m3u8 playlist 和 .ts segments
+    pub fn generate_hls(&self, output_dir: &str, quality: &HlsQuality) -> Command {
+        let mut cmd = Command::new("ffmpeg");
+        
+        // GPU 加速解碼
+        match self.gpu {
+            GpuAcceleration::Nvidia => {
+                cmd.arg("-hwaccel").arg("cuda")
+                   .arg("-hwaccel_output_format").arg("cuda");
+            }
+            GpuAcceleration::Intel => {
+                cmd.arg("-hwaccel").arg("qsv");
+            }
+            _ => {}
+        }
+        
+        cmd.arg("-i").arg(&self.input_path);
+        
+        // 縮放和編碼
+        let scale = format!("-2:{}", quality.height);
+        
+        match self.gpu {
+            GpuAcceleration::Nvidia => {
+                cmd.arg("-vf").arg(format!("scale_cuda={}", scale))
+                   .arg("-c:v").arg("h264_nvenc")
+                   .arg("-preset").arg("p4")
+                   .arg("-b:v").arg(format!("{}k", quality.video_bitrate_kbps))
+                   .arg("-maxrate").arg(format!("{}k", (quality.video_bitrate_kbps as f32 * 1.2) as u32))
+                   .arg("-bufsize").arg(format!("{}k", quality.video_bitrate_kbps * 2));
+            }
+            GpuAcceleration::Intel => {
+                cmd.arg("-vf").arg(format!("scale_qsv={}:format=nv12", scale))
+                   .arg("-c:v").arg("h264_qsv")
+                   .arg("-b:v").arg(format!("{}k", quality.video_bitrate_kbps));
+            }
+            _ => {
+                cmd.arg("-vf").arg(format!("scale={}", scale))
+                   .arg("-c:v").arg("libx264")
+                   .arg("-preset").arg("fast")
+                   .arg("-b:v").arg(format!("{}k", quality.video_bitrate_kbps))
+                   .arg("-maxrate").arg(format!("{}k", (quality.video_bitrate_kbps as f32 * 1.2) as u32))
+                   .arg("-bufsize").arg(format!("{}k", quality.video_bitrate_kbps * 2));
+            }
+        }
+        
+        // 音頻編碼
+        cmd.arg("-c:a").arg("aac")
+           .arg("-b:a").arg(format!("{}k", quality.audio_bitrate_kbps));
+        
+        // HLS 特定參數
+        let playlist_path = format!("{}/playlist.m3u8", output_dir);
+        let segment_pattern = format!("{}/segment_%03d.ts", output_dir);
+        
+        cmd.arg("-f").arg("hls")
+           .arg("-hls_time").arg("6")           // 每個 segment 6 秒
+           .arg("-hls_list_size").arg("0")      // 保留所有 segments
+           .arg("-hls_segment_filename").arg(&segment_pattern)
+           .arg("-hls_playlist_type").arg("vod") // VOD 模式
+           .arg("-y")
+           .arg(&playlist_path);
+        
+        cmd
+    }
+    
+    /// 生成多碼率 HLS (Master Playlist)
+    /// 這會建立一個 master.m3u8 指向多個品質的子播放清單
+    pub fn generate_master_playlist(output_dir: &str, qualities: &[HlsQuality]) -> std::io::Result<()> {
+        use std::fs::File;
+        use std::io::Write;
+        
+        let master_path = format!("{}/master.m3u8", output_dir);
+        let mut file = File::create(&master_path)?;
+        
+        writeln!(file, "#EXTM3U")?;
+        writeln!(file, "#EXT-X-VERSION:3")?;
+        
+        for quality in qualities {
+            let bandwidth = (quality.video_bitrate_kbps + quality.audio_bitrate_kbps) * 1000;
+            writeln!(file, "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}",
+                bandwidth, quality.width, quality.height)?;
+            writeln!(file, "{}/playlist.m3u8", quality.name)?;
+        }
+        
+        Ok(())
+    }
+}
+
+/// HLS 品質設定
+#[derive(Debug, Clone)]
+pub struct HlsQuality {
+    pub name: String,           // e.g., "1080p", "720p", "480p"
+    pub width: u32,
+    pub height: u32,
+    pub video_bitrate_kbps: u32,
+    pub audio_bitrate_kbps: u32,
+}
+
+impl HlsQuality {
+    pub fn preset_1080p() -> Self {
+        Self {
+            name: "1080p".to_string(),
+            width: 1920,
+            height: 1080,
+            video_bitrate_kbps: 5000,
+            audio_bitrate_kbps: 192,
+        }
+    }
+    
+    pub fn preset_720p() -> Self {
+        Self {
+            name: "720p".to_string(),
+            width: 1280,
+            height: 720,
+            video_bitrate_kbps: 2500,
+            audio_bitrate_kbps: 128,
+        }
+    }
+    
+    pub fn preset_480p() -> Self {
+        Self {
+            name: "480p".to_string(),
+            width: 854,
+            height: 480,
+            video_bitrate_kbps: 1000,
+            audio_bitrate_kbps: 96,
+        }
+    }
+    
+    pub fn preset_360p() -> Self {
+        Self {
+            name: "360p".to_string(),
+            width: 640,
+            height: 360,
+            video_bitrate_kbps: 600,
+            audio_bitrate_kbps: 64,
+        }
+    }
+    
+    /// 根據名稱獲取預設品質
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "1080p" | "1080" => Some(Self::preset_1080p()),
+            "720p" | "720" => Some(Self::preset_720p()),
+            "480p" | "480" => Some(Self::preset_480p()),
+            "360p" | "360" => Some(Self::preset_360p()),
+            _ => None,
+        }
+    }
+    
+    /// 取得所有預設品質
+    pub fn all_presets() -> Vec<Self> {
+        vec![
+            Self::preset_1080p(),
+            Self::preset_720p(),
+            Self::preset_480p(),
+            Self::preset_360p(),
+        ]
+    }
 }
 
 /// 檢測 FFmpeg 是否支援指定的硬體加速
