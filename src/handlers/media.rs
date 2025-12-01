@@ -7,7 +7,9 @@ use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 use std::process::Stdio;
 use crate::state::AppState;
+use crate::utils::ffmpeg::FfmpegCommand;
 use serde::Deserialize;
+use tracing::{info, warn};
 
 #[derive(Deserialize)]
 pub struct StreamParams {
@@ -23,7 +25,8 @@ pub struct StreamParams {
         ("resolution" = Option<String>, Query, description = "Target resolution (e.g., 1280x720)")
     ),
     responses(
-        (status = 200, description = "Stream media")
+        (status = 200, description = "Stream media"),
+        (status = 503, description = "Transcoding slots full, try again later")
     )
 )]
 pub async fn stream_media(
@@ -40,24 +43,45 @@ pub async fn stream_media(
     }
 
     if let Some(resolution) = params.resolution {
-        // Transcoding
-        // Note: This requires ffmpeg to be installed on the system
-        let child = Command::new("ffmpeg")
-            .arg("-i")
-            .arg(&file_path)
-            .arg("-vf")
-            .arg(format!("scale={}", resolution))
-            .arg("-f")
-            .arg("matroska") // Streamable format
-            .arg("-") // Output to stdout
+        // 嘗試獲取轉碼許可 (非阻塞)
+        // Try to acquire transcode permit (non-blocking)
+        let permit = match state.transcode_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                // 所有轉碼槽位都在使用中
+                // All transcode slots are busy
+                let max_transcodes = crate::state::get_max_concurrent_transcodes();
+                warn!("Transcode request rejected: all {} slots busy", max_transcodes);
+                return Response::builder()
+                    .status(503)
+                    .header("Retry-After", "5")
+                    .body(Body::from(format!(
+                        "Server is busy with {} concurrent transcodes. Please try again later.",
+                        max_transcodes
+                    )))
+                    .unwrap();
+            }
+        };
+
+        info!("Starting transcode for {} at resolution {}", params.path, resolution);
+
+        // 使用 FfmpegCommand 建構器生成命令 (支援 GPU 加速)
+        let ffmpeg_cmd = FfmpegCommand::new(&file_path.to_string_lossy());
+        let std_cmd = ffmpeg_cmd.transcode_stream(&resolution);
+        
+        // 轉換為 tokio Command
+        let child = Command::from(std_cmd)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null()) // Ignore stderr
+            .stderr(Stdio::null())
             .spawn();
 
         match child {
             Ok(mut child) => {
                 let stdout = child.stdout.take().expect("Failed to open stdout");
-                let stream = ReaderStream::new(stdout);
+                
+                // 當 stream 結束時自動釋放 permit
+                // Permit is automatically released when the stream ends
+                let stream = TranscodeStream::new(stdout, permit);
                 
                 Response::builder()
                     .header("Content-Type", "video/x-matroska")
@@ -65,6 +89,7 @@ pub async fn stream_media(
                     .unwrap()
             }
             Err(e) => {
+                // permit 會在這裡被 drop，自動釋放
                 Response::builder()
                     .status(500)
                     .body(Body::from(format!("Failed to start transcoding: {}", e)))
@@ -80,6 +105,36 @@ pub async fn stream_media(
             .status(400)
             .body(Body::from("Resolution required for transcoding. For direct play, use /api/download/{path}"))
             .unwrap()
+    }
+}
+
+/// 包裝 stream 以便在完成時釋放 semaphore permit
+/// Wrapper stream that releases semaphore permit when done
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::AsyncRead;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio_util::bytes::Bytes;
+
+pub struct TranscodeStream<R> {
+    inner: ReaderStream<R>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<R: AsyncRead> TranscodeStream<R> {
+    pub fn new(reader: R, permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            inner: ReaderStream::new(reader),
+            _permit: permit,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> futures::Stream for TranscodeStream<R> {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        futures::Stream::poll_next(Pin::new(&mut self.inner), cx)
     }
 }
 

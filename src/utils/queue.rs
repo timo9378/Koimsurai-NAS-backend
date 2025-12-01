@@ -1,6 +1,5 @@
 use tokio::sync::{mpsc, broadcast};
 use std::path::PathBuf;
-use std::process::Command;
 use tracing::{info, error};
 use sqlx::{Pool, Sqlite};
 use uuid::Uuid;
@@ -17,6 +16,14 @@ pub enum JobType {
         input_path: PathBuf,
         output_path: PathBuf,
     },
+    /// 生成影片 Proxy (低碼率預覽版)
+    /// 適用於 GoPro 等高碼率影片的瀏覽器預覽
+    GenerateVideoProxy {
+        input_path: PathBuf,
+        output_path: PathBuf,
+        target_height: u32,   // e.g., 720 or 1080
+        bitrate_kbps: u32,    // e.g., 2000 (2Mbps)
+    },
     CopyFiles {
         paths: Vec<String>,
         destination: String,
@@ -31,6 +38,7 @@ impl ToString for JobType {
         match self {
             JobType::Transcode { .. } => "transcode".to_string(),
             JobType::GenerateThumbnail { .. } => "generate_thumbnail".to_string(),
+            JobType::GenerateVideoProxy { .. } => "generate_video_proxy".to_string(),
             JobType::CopyFiles { .. } => "copy_files".to_string(),
             JobType::IndexFile { .. } => "index_file".to_string(),
         }
@@ -103,13 +111,13 @@ pub async fn worker(mut receiver: mpsc::Receiver<Job>, pool: Pool<Sqlite>, tx: b
 
         let result = match job.job_type {
             JobType::Transcode { input_path, output_path, resolution } => {
-                let status = Command::new("ffmpeg")
-                    .arg("-i")
-                    .arg(&input_path)
-                    .arg("-vf")
-                    .arg(format!("scale={}", resolution))
-                    .arg(&output_path)
-                    .status();
+                // 使用支援 GPU 加速的 FFmpeg 命令
+                use crate::utils::ffmpeg::FfmpegCommand;
+                
+                let ffmpeg = FfmpegCommand::new(&input_path.to_string_lossy())
+                    .output(&output_path.to_string_lossy());
+                let mut cmd = ffmpeg.transcode(&resolution);
+                let status = cmd.status();
 
                 match status {
                     Ok(s) if s.success() => Ok(()),
@@ -118,20 +126,48 @@ pub async fn worker(mut receiver: mpsc::Receiver<Job>, pool: Pool<Sqlite>, tx: b
                 }
             }
             JobType::GenerateThumbnail { input_path, output_path } => {
-                let status = Command::new("ffmpeg")
-                    .arg("-i")
-                    .arg(&input_path)
-                    .arg("-ss")
-                    .arg("00:00:01.000")
-                    .arg("-vframes")
-                    .arg("1")
-                    .arg(&output_path)
-                    .status();
+                // 使用支援 GPU 加速的縮圖生成
+                use crate::utils::ffmpeg::FfmpegCommand;
+                
+                let ffmpeg = FfmpegCommand::new(&input_path.to_string_lossy());
+                let mut cmd = ffmpeg.thumbnail(&output_path.to_string_lossy(), 800); // 800px 預設
+                let status = cmd.status();
 
                 match status {
                     Ok(s) if s.success() => Ok(()),
                     Ok(s) => Err(format!("Thumbnail generation failed with status: {}", s)),
                     Err(e) => Err(format!("Failed to execute ffmpeg: {}", e)),
+                }
+            }
+            JobType::GenerateVideoProxy { input_path, output_path, target_height, bitrate_kbps } => {
+                // 為高碼率影片（如 GoPro）生成低碼率 proxy
+                // Proxy 用於預覽，原始檔案保留供下載
+                use crate::utils::ffmpeg::FfmpegCommand;
+                
+                // 確保輸出目錄存在
+                if let Some(parent) = output_path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                
+                let ffmpeg = FfmpegCommand::new(&input_path.to_string_lossy());
+                let mut cmd = ffmpeg.generate_proxy(
+                    &output_path.to_string_lossy(),
+                    target_height,
+                    bitrate_kbps,
+                );
+                
+                info!("Generating proxy: {:?} -> {:?} @ {}p {}kbps",
+                      input_path, output_path, target_height, bitrate_kbps);
+                
+                let status = cmd.status();
+
+                match status {
+                    Ok(s) if s.success() => {
+                        info!("Proxy generated successfully: {:?}", output_path);
+                        Ok(())
+                    },
+                    Ok(s) => Err(format!("Proxy generation failed with status: {}", s)),
+                    Err(e) => Err(format!("Failed to execute ffmpeg for proxy: {}", e)),
                 }
             }
             JobType::CopyFiles { paths, destination } => {

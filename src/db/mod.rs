@@ -1,11 +1,21 @@
 use sqlx::{migrate::MigrateDatabase, sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::env;
 use anyhow::Result;
+use tracing::info;
 
 // 初始化資料庫連線與表格
 // Initialize database connection and tables
 pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
     let database_url = database_url.unwrap_or_else(|| env::var("DATABASE_URL").expect("DATABASE_URL must be set"));
+    
+    // 從環境變數讀取資料庫連線數 (開發機: 5, Server: 50+)
+    // Read max connections from env (Dev: 5, Server: 50+)
+    let max_connections = env::var("DATABASE_MAX_CONNECTIONS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse::<u32>()
+        .unwrap_or(5);
+    
+    info!("Database max connections: {}", max_connections);
     
     // 如果資料庫檔案不存在，則建立它
     // Create database file if it doesn't exist
@@ -15,9 +25,35 @@ pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
     }
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_connections)
         .connect(&database_url)
         .await?;
+
+    // 啟用 WAL 模式以提升並發效能 (對 Litestream 也是推薦的)
+    // Enable WAL mode for better concurrency (also recommended for Litestream)
+    sqlx::query("PRAGMA journal_mode=WAL")
+        .execute(&pool)
+        .await?;
+    
+    // 設定 synchronous 為 NORMAL (WAL 模式下的推薦設定)
+    // Set synchronous to NORMAL (recommended for WAL mode)
+    sqlx::query("PRAGMA synchronous=NORMAL")
+        .execute(&pool)
+        .await?;
+    
+    // 從環境變數讀取 mmap_size (MB)，讓常用資料駐留 RAM
+    // Read mmap_size from env (MB), keeps frequently accessed data in RAM
+    let mmap_size_mb = env::var("DATABASE_MMAP_SIZE_MB")
+        .unwrap_or_else(|_| "256".to_string())
+        .parse::<u64>()
+        .unwrap_or(256);
+    
+    let mmap_size_bytes = mmap_size_mb * 1024 * 1024;
+    sqlx::query(&format!("PRAGMA mmap_size={}", mmap_size_bytes))
+        .execute(&pool)
+        .await?;
+    
+    info!("Database mmap_size: {}MB", mmap_size_mb);
 
     // 建立使用者表格
     // Create users table
@@ -179,6 +215,20 @@ pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
             ip_address TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
+    // 建立系統設定表格 (用於追蹤掃描狀態等)
+    // Create system_settings table (for tracking scan state etc.)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         "#
     )

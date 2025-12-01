@@ -11,7 +11,8 @@ pub mod services;
 use std::sync::Arc;
 use std::path::PathBuf;
 use dav_server::{localfs::LocalFs, DavHandler};
-use crate::state::AppState;
+use tokio::sync::Semaphore;
+use crate::state::{AppState, get_max_concurrent_transcodes};
 use crate::utils::queue::{JobQueue, worker};
 use crate::services::indexer::Indexer;
 use crate::services::audit::AuditService;
@@ -58,6 +59,11 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
     // Initialize Audit Service
     let audit = Arc::new(AuditService::new(pool.clone()));
 
+    // Initialize Transcode Semaphore (限制同時轉碼數量)
+    let max_transcodes = get_max_concurrent_transcodes();
+    tracing::info!("Max concurrent transcodes: {}", max_transcodes);
+    let transcode_semaphore = Arc::new(Semaphore::new(max_transcodes));
+
     let state = AppState {
         pool,
         storage_path,
@@ -66,6 +72,7 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
         tx,
         audit,
         search,
+        transcode_semaphore,
     };
 
     routes::create_router(state).await

@@ -1,0 +1,50 @@
+# Litestream Configuration for Koimsurai NAS
+# 
+# Litestream 是一個 SQLite 的持續備份工具，它會自動將 WAL 變更串流到 S3 相容的儲存空間。
+# Litestream is a streaming replication tool for SQLite that continuously backs up 
+# WAL changes to S3-compatible storage.
+#
+# 安裝 Litestream:
+# - Linux/macOS: curl -fsSL https://github.com/benbjohnson/litestream/releases/latest/download/litestream-v0.3.13-linux-amd64.tar.gz | tar xvz
+# - Docker: 使用 litestream/litestream 映像
+#
+# 使用方式:
+# litestream replicate -config litestream.yml
+
+# 資料庫配置
+dbs:
+  - path: ./nas.db
+    replicas:
+      # 選項 1: S3 相容儲存 (推薦用於生產環境)
+      # - type: s3
+      #   bucket: your-bucket-name
+      #   path: backups/nas
+      #   region: ap-northeast-1
+      #   access-key-id: YOUR_ACCESS_KEY
+      #   secret-access-key: YOUR_SECRET_KEY
+      #   # 或者使用環境變數:
+      #   # access-key-id: $AWS_ACCESS_KEY_ID
+      #   # secret-access-key: $AWS_SECRET_ACCESS_KEY
+
+      # 選項 2: 本地檔案系統 (適合開發/測試)
+      - type: file
+        path: ./backups/nas
+
+      # 選項 3: SFTP (適合備份到另一台 NAS)
+      # - type: sftp
+      #   host: backup-server.local
+      #   user: backup
+      #   path: /backups/nas
+      #   key-path: ~/.ssh/id_rsa
+
+# 重要注意事項:
+# 1. Litestream 只備份 SQLite 資料庫 (nas.db)
+# 2. 實際的檔案儲存 (storage/) 需要使用其他工具備份，例如:
+#    - Rclone (rclone sync ./storage/ remote:nas-storage/)
+#    - Rsync (rsync -avz ./storage/ user@backup:/nas-storage/)
+#    - Borg Backup (更適合有版本控制需求的場景)
+#
+# 災難復原流程:
+# 1. 還原 Litestream 備份: litestream restore -o ./nas.db -config litestream.yml
+# 2. 還原檔案備份到 storage/
+# 3. 啟動 NAS 服務 - Indexer 會自動掃描並同步 DB 與檔案系統的差異

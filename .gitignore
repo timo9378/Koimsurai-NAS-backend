@@ -4,3 +4,19 @@
 *.db-wal
 .env
 
+# Storage 目錄中的使用者資料 (保留目錄結構但不追蹤內容)
+# User data in storage directory (keep structure but don't track contents)
+/storage/*
+!/storage/.gitkeep
+
+# 系統暫存檔
+# System temp files
+.DS_Store
+Thumbs.db
+
+# IDE/編輯器
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo

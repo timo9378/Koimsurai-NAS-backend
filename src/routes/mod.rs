@@ -18,7 +18,7 @@ use crate::handlers::tag::AddTagRequest;
 use crate::services::audit::AuditLog;
 use crate::utils::versioning::FileVersion;
 use crate::services::search::SearchResult;
-use crate::handlers::system::{SystemStatus, DiskInfo};
+use crate::handlers::system::{SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult};
 use crate::handlers::media::TimelineGroup;
 
 #[derive(OpenApi)]
@@ -40,6 +40,8 @@ use crate::handlers::media::TimelineGroup;
         share::create_share_link,
         share::access_share_link,
         system::get_system_status,
+        system::verify_consistency,
+        system::trigger_rescan,
         job::list_jobs,
         upload::init_upload,
         upload::upload_chunk,
@@ -55,7 +57,7 @@ use crate::handlers::media::TimelineGroup;
         media::get_timeline
     ),
     components(
-        schemas(RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest)
+        schemas(RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest)
     ),
     tags(
         (name = "auth", description = "Authentication endpoints"),
@@ -102,6 +104,9 @@ pub async fn create_router(state: AppState) -> Router {
 
         .route("/share", post(share::create_share_link))
         .route("/system/status", get(system::get_system_status))
+        // 系統管理端點 (適合在 DB 還原後執行)
+        .route("/system/verify-consistency", post(system::verify_consistency))
+        .route("/system/rescan", post(system::trigger_rescan))
         .route("/media/stream", get(media::stream_media))
         .route("/media/timeline", get(media::get_timeline))
         .route("/trash", get(trash::list_trash))

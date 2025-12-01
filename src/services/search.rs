@@ -4,14 +4,41 @@ use tantivy::schema::*;
 use tantivy::{Index, IndexWriter, ReloadPolicy, doc};
 use tantivy::schema::{TantivyDocument, Value};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+use std::time::{Duration, Instant};
+use std::env;
 use crate::error::AppError;
 use axum::http::StatusCode;
+use tracing::{debug, info};
+
+/// 批次提交配置 - 從環境變數讀取
+/// Batch commit configuration - read from env
+fn get_batch_size() -> usize {
+    env::var("SEARCH_BATCH_SIZE")
+        .unwrap_or_else(|_| "100".to_string())
+        .parse()
+        .unwrap_or(100)
+}
+
+fn get_commit_interval_secs() -> u64 {
+    env::var("SEARCH_COMMIT_INTERVAL_SECS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse()
+        .unwrap_or(5)
+}
 
 pub struct SearchService {
     index: Index,
     writer: Arc<Mutex<IndexWriter>>,
     schema: Schema,
+    /// 追蹤待 commit 的文件數量
+    pending_count: AtomicUsize,
+    /// 上次 commit 的時間
+    last_commit: Arc<Mutex<Instant>>,
+    /// 批次大小
+    batch_size: usize,
+    /// commit 間隔 (秒)
+    commit_interval: Duration,
 }
 
 impl SearchService {
@@ -30,15 +57,37 @@ impl SearchService {
         let index = Index::open_or_create(tantivy::directory::MmapDirectory::open(&index_path).map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?, schema.clone())
             .map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
 
-        let writer = index.writer(50_000_000).map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
+        // 從環境變數讀取搜尋索引緩衝區大小 (MB)
+        // Read search index buffer size from env (MB)
+        // 開發機: 50MB, Server: 500MB+
+        let buffer_size_mb = env::var("SEARCH_INDEX_BUFFER_MB")
+            .unwrap_or_else(|_| "50".to_string())
+            .parse::<usize>()
+            .unwrap_or(50);
+        
+        let buffer_size = buffer_size_mb * 1_000_000;
+        info!("Search index buffer size: {}MB", buffer_size_mb);
+        
+        let writer = index.writer(buffer_size).map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
+        
+        let batch_size = get_batch_size();
+        let commit_interval = Duration::from_secs(get_commit_interval_secs());
+        
+        info!("Search batch_size: {}, commit_interval: {:?}", batch_size, commit_interval);
 
         Ok(Self {
             index,
             writer: Arc::new(Mutex::new(writer)),
             schema,
+            pending_count: AtomicUsize::new(0),
+            last_commit: Arc::new(Mutex::new(Instant::now())),
+            batch_size,
+            commit_interval,
         })
     }
 
+    /// 索引單一檔案 (不立即 commit，使用批次策略)
+    /// Index a single file (doesn't commit immediately, uses batch strategy)
     pub fn index_file(&self, path: &str, name: &str, content: &str) -> Result<(), AppError> {
         let mut writer = self.writer.lock().map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
         
@@ -57,15 +106,48 @@ impl SearchService {
         );
 
         writer.add_document(doc).map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
-        writer.commit().map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
+        
+        // 增加待處理計數
+        let pending = self.pending_count.fetch_add(1, Ordering::SeqCst) + 1;
+        
+        // 檢查是否需要 commit
+        let should_commit = {
+            let last_commit = self.last_commit.lock().map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+            pending >= self.batch_size || last_commit.elapsed() >= self.commit_interval
+        };
+        
+        if should_commit {
+            debug!("Batch committing {} indexed files", pending);
+            writer.commit().map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
+            self.pending_count.store(0, Ordering::SeqCst);
+            *self.last_commit.lock().map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))? = Instant::now();
+        }
 
         Ok(())
     }
 
+    /// 強制 commit 所有待處理的索引變更
+    /// Force commit all pending index changes
+    pub fn flush(&self) -> Result<(), AppError> {
+        let pending = self.pending_count.load(Ordering::SeqCst);
+        if pending > 0 {
+            info!("Flushing {} pending index entries", pending);
+            let mut writer = self.writer.lock().map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+            writer.commit().map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
+            self.pending_count.store(0, Ordering::SeqCst);
+            *self.last_commit.lock().map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))? = Instant::now();
+        }
+        Ok(())
+    }
+
     pub fn search(&self, query_str: &str) -> Result<Vec<SearchResult>, AppError> {
+        // 搜尋前先 flush 確保結果最新 (可選)
+        // Optionally flush before search to ensure up-to-date results
+        // self.flush()?;
+        
         let reader = self.index
             .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
+            .reload_policy(ReloadPolicy::OnCommitWithDelay) // 改用 OnCommitWithDelay 來自動更新
             .try_into()
             .map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
 
