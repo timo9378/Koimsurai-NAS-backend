@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use std::env;
 use crate::error::AppError;
 use axum::http::StatusCode;
+use sqlx::{Pool, Sqlite};
 use tracing::{debug, info};
 
 /// 批次提交配置 - 從環境變數讀取
@@ -186,4 +187,79 @@ pub struct SearchResult {
     pub path: String,
     pub name: String,
     pub score: f32,
+}
+
+/// AI 標籤搜尋結果
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct AiTagSearchResult {
+    pub path: String,
+    pub name: String,
+    pub tag: String,
+    pub confidence: f32,
+}
+
+/// 在資料庫中搜尋含有指定 AI 標籤的圖片
+/// Search images containing specified AI tag in database
+pub async fn search_by_ai_tag(
+    pool: &Pool<Sqlite>,
+    tag_query: &str,
+    min_confidence: Option<f32>,
+    limit: Option<i32>,
+) -> Result<Vec<AiTagSearchResult>, AppError> {
+    let min_conf = min_confidence.unwrap_or(0.3);
+    let limit = limit.unwrap_or(50);
+
+    let results = sqlx::query_as::<_, (String, String, f64)>(
+        r#"
+        SELECT t.file_path, t.tag_name, t.confidence
+        FROM image_ai_tags t
+        INNER JOIN files f ON t.file_path = f.path
+        WHERE t.tag_name LIKE ?
+          AND t.confidence >= ?
+        ORDER BY t.confidence DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(format!("%{}%", tag_query))
+    .bind(min_conf as f64)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
+
+    Ok(results
+        .into_iter()
+        .map(|(path, tag, confidence)| {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            AiTagSearchResult {
+                path,
+                name,
+                tag,
+                confidence: confidence as f32,
+            }
+        })
+        .collect())
+}
+
+/// 取得所有可用的 AI 標籤 (用於自動完成)
+/// Get all available AI tags (for autocomplete)
+pub async fn get_all_ai_tags(pool: &Pool<Sqlite>) -> Result<Vec<(String, i32)>, AppError> {
+    let results = sqlx::query_as::<_, (String, i32)>(
+        r#"
+        SELECT tag_name, COUNT(*) as count 
+        FROM image_ai_tags
+        GROUP BY tag_name
+        ORDER BY count DESC
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Anyhow(anyhow::anyhow!(e)))?;
+
+    Ok(results)
 }

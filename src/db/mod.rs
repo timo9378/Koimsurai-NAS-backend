@@ -235,6 +235,42 @@ pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // 建立 AI 圖片標籤表格
+    // Create image_ai_tags table for AI-detected labels (CLIP/ResNet)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS image_ai_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path TEXT NOT NULL,
+            tag_name TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            model_name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(file_path, tag_name, model_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_ai_tags_file_path ON image_ai_tags(file_path);
+        CREATE INDEX IF NOT EXISTS idx_image_ai_tags_tag_name ON image_ai_tags(tag_name);
+        CREATE INDEX IF NOT EXISTS idx_image_ai_tags_confidence ON image_ai_tags(confidence);
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
+    // 建立 AI 分析狀態表格 (追蹤哪些圖片已分析)
+    // Create ai_analysis_status table (track which images have been analyzed)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ai_analysis_status (
+            file_path TEXT PRIMARY KEY,
+            analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            model_version TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'completed'
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
     println!("Database initialized successfully");
     Ok(pool)
 }

@@ -1,6 +1,6 @@
 use tokio::sync::{mpsc, broadcast};
 use std::path::PathBuf;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use sqlx::{Pool, Sqlite};
 use uuid::Uuid;
 use crate::models::job::{JobStatus, JobUpdate};
@@ -37,6 +37,10 @@ pub enum JobType {
     IndexFile {
         path: String,
     },
+    /// AI 圖片分析任務
+    AiAnalyzeImage {
+        image_path: String,
+    },
 }
 
 impl ToString for JobType {
@@ -48,6 +52,7 @@ impl ToString for JobType {
             JobType::GenerateHls { .. } => "generate_hls".to_string(),
             JobType::CopyFiles { .. } => "copy_files".to_string(),
             JobType::IndexFile { .. } => "index_file".to_string(),
+            JobType::AiAnalyzeImage { .. } => "ai_analyze_image".to_string(),
         }
     }
 }
@@ -94,10 +99,17 @@ impl JobQueue {
 }
 
 use crate::services::search::SearchService;
+use crate::services::ai::AiService;
 use std::sync::Arc;
 
-pub async fn worker(mut receiver: mpsc::Receiver<Job>, pool: Pool<Sqlite>, tx: broadcast::Sender<JobUpdate>, search_service: Arc<SearchService>) {
-    info!("Job worker started");
+pub async fn worker(
+    mut receiver: mpsc::Receiver<Job>,
+    pool: Pool<Sqlite>,
+    tx: broadcast::Sender<JobUpdate>,
+    search_service: Arc<SearchService>,
+    ai_service: Option<Arc<AiService>>,
+) {
+    info!("Job worker started (AI service: {})", if ai_service.is_some() { "enabled" } else { "disabled" });
     while let Some(job) = receiver.recv().await {
         info!("Processing job: {:?}", job);
         
@@ -320,6 +332,30 @@ pub async fn worker(mut receiver: mpsc::Receiver<Job>, pool: Pool<Sqlite>, tx: b
                     }
                 } else {
                     Err("File not found".to_string())
+                }
+            }
+            JobType::AiAnalyzeImage { image_path } => {
+                // AI 圖片分析任務
+                match &ai_service {
+                    Some(ai) => {
+                        info!("AI analyzing image: {}", image_path);
+                        match ai.analyze_and_save(&image_path).await {
+                            Ok(result) => {
+                                info!("AI analysis completed for {}: {} tags detected", 
+                                      image_path, result.tags.len());
+                                Ok(())
+                            }
+                            Err(e) => {
+                                error!("AI analysis failed for {}: {}", image_path, e);
+                                Err(format!("AI analysis failed: {}", e))
+                            }
+                        }
+                    }
+                    None => {
+                        // AI 服務未啟用，跳過此任務
+                        warn!("AI service not enabled, skipping AI analysis job for: {}", image_path);
+                        Ok(()) // 返回 Ok 避免任務被標記為失敗
+                    }
                 }
             }
         };

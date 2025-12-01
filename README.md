@@ -153,6 +153,39 @@
 |------|------|------|
 | ANY | `/webdav/*` | WebDAV 協定入口 |
 
+### 🐳 Docker 管理 (Container Manager)
+類似 Synology Container Manager，需設定 `ENABLE_DOCKER_MANAGER=true`。
+
+| 方法 | 路徑 | 描述 | Body / Query |
+|------|------|------|--------------|
+| GET | `/api/docker/status` | Docker 連線狀態 | - |
+| POST | `/api/docker/connect` | 連接 Docker daemon | - |
+| GET | `/api/docker/containers` | 列出所有容器 | `?all=true` |
+| GET | `/api/docker/containers/:id` | 容器詳情 | - |
+| POST | `/api/docker/containers/:id/start` | 啟動容器 | - |
+| POST | `/api/docker/containers/:id/stop` | 停止容器 | `{ "timeout": 10 }` |
+| POST | `/api/docker/containers/:id/restart` | 重啟容器 | `{ "timeout": 10 }` |
+| DELETE | `/api/docker/containers/:id` | 刪除容器 | `?force=true` |
+| GET | `/api/docker/containers/:id/logs` | 容器日誌 | `?tail=100&since=0` |
+| GET | `/api/docker/containers/:id/stats` | 容器統計 | CPU, Memory, Network |
+| GET | `/api/docker/images` | 列出所有鏡像 | - |
+| POST | `/api/docker/images/pull` | 拉取鏡像 | `{ "image": "nginx", "tag": "latest" }` |
+| DELETE | `/api/docker/images/:id` | 刪除鏡像 | `?force=true` |
+
+### 🤖 AI 圖片標籤 (AI Smart Tagging)
+類似 Synology Photos 的智慧標籤功能，需設定 `ENABLE_AI_LABELLING=true`。
+
+| 方法 | 路徑 | 描述 | Body / Query |
+|------|------|------|--------------|
+| GET | `/api/search/ai-tags` | AI 標籤搜尋 | `?tag=beach&min_confidence=0.5` |
+| GET | `/api/search/ai-tags/list` | 所有 AI 標籤 | - |
+
+**功能特點**:
+- 使用 CLIP/ResNet 等模型自動識別圖片內容
+- 支援 GPU 加速 (NVIDIA RTX 系列)
+- 可配置信心度門檻過濾低品質標籤
+- 與全文搜尋整合，支援 "tag:beach" 語法
+
 ---
 
 ## 🏗️ 專案結構
@@ -161,8 +194,8 @@
 src/
 ├── handlers/       # API 請求處理 (Controller)
 ├── models/         # 資料結構與資料庫模型
-├── services/       # 核心業務邏輯 (Indexer, Search, Audit)
-├── utils/          # 工具函式 (Queue, Image, Versioning)
+├── services/       # 核心業務邏輯 (Indexer, Search, Audit, AI, Docker)
+├── utils/          # 工具函式 (Queue, Image, Versioning, FFmpeg)
 ├── middleware/     # 中介軟體 (Auth)
 ├── routes/         # 路由定義
 ├── db/             # 資料庫連線與遷移
@@ -171,10 +204,39 @@ src/
 
 ## 🛠️ 技術棧
 
-- **語言**: Rust
-- **Web 框架**: Axum
-- **資料庫**: SQLite (SQLx)
+- **語言**: Rust (Edition 2024)
+- **Web 框架**: Axum 0.7
+- **資料庫**: SQLite (SQLx) + WAL 模式
 - **非同步執行**: Tokio
 - **搜尋引擎**: Tantivy
-- **媒體處理**: FFmpeg, Image-rs
+- **媒體處理**: FFmpeg (GPU 加速), Image-rs
+- **容器管理**: Bollard (Docker API)
+- **AI 推理**: (預留) ort/candle (ONNX Runtime / Candle)
 - **API 文件**: Utoipa (OpenAPI)
+
+## 🔧 性能調優
+
+本專案設計支援從低規格開發機到高性能伺服器的彈性配置。
+
+### 開發環境 (低規格)
+```env
+DATABASE_MAX_CONNECTIONS=5
+DATABASE_MMAP_SIZE_MB=64
+SEARCH_INDEX_BUFFER_MB=50
+MAX_CONCURRENT_TRANSCODES=2
+ENABLE_DOCKER_MANAGER=false
+ENABLE_AI_LABELLING=false
+```
+
+### 生產環境 (64GB RAM + RTX 5060 Ti)
+```env
+DATABASE_MAX_CONNECTIONS=50
+DATABASE_MMAP_SIZE_MB=512
+SEARCH_INDEX_BUFFER_MB=500
+MAX_CONCURRENT_TRANSCODES=6
+USE_GPU_TRANSCODE=auto
+ENABLE_DOCKER_MANAGER=true
+ENABLE_AI_LABELLING=true
+AI_MAX_CONCURRENT=6
+AI_USE_GPU=true
+```

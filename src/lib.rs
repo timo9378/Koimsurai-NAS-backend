@@ -12,12 +12,13 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use dav_server::{localfs::LocalFs, DavHandler};
 use tokio::sync::Semaphore;
-use crate::state::{AppState, get_max_concurrent_transcodes, get_docker_enabled};
+use crate::state::{AppState, get_max_concurrent_transcodes, get_docker_enabled, get_ai_enabled};
 use crate::utils::queue::{JobQueue, worker};
 use crate::services::indexer::Indexer;
 use crate::services::audit::AuditService;
 use crate::services::search::SearchService;
 use crate::services::docker::DockerService;
+use crate::services::ai::AiService;
 use sqlx::SqlitePool;
 
 pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router {
@@ -47,9 +48,24 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
     // Initialize Search Service
     let search = Arc::new(SearchService::new(&storage_path).expect("Failed to initialize search service"));
 
-    // Spawn worker
+    // Initialize AI Service (可選)
+    let ai_service = if get_ai_enabled() {
+        tracing::info!("🤖 AI Image Labelling ENABLED");
+        let config = AiService::config_from_env();
+        tracing::info!(
+            "   Model: {}, Min confidence: {}, GPU: {}, Max concurrent: {}",
+            config.model_name, config.min_confidence, config.use_gpu, config.max_concurrent_inferences
+        );
+        Some(Arc::new(AiService::new(pool.clone(), Some(config))))
+    } else {
+        tracing::info!("🤖 AI Image Labelling DISABLED (set ENABLE_AI_LABELLING=true to enable)");
+        None
+    };
+
+    // Spawn worker (傳遞 ai_service)
     let search_clone = search.clone();
-    tokio::spawn(worker(receiver, pool.clone(), tx.clone(), search_clone));
+    let ai_clone = ai_service.clone();
+    tokio::spawn(worker(receiver, pool.clone(), tx.clone(), search_clone, ai_clone));
 
     // Initialize WebDAV
     let webdav = DavHandler::builder()
@@ -67,17 +83,17 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
 
     // Initialize Docker Service (可選)
     let docker_service = if get_docker_enabled() {
-        tracing::info!("Docker management enabled");
+        tracing::info!("🐳 Docker management ENABLED");
         let service = Arc::new(DockerService::new());
         // 嘗試連接到 Docker daemon
         if let Err(e) = service.connect().await {
             tracing::warn!("Failed to connect to Docker daemon: {}. Docker features may not work until manually connected.", e);
         } else {
-            tracing::info!("Successfully connected to Docker daemon");
+            tracing::info!("   Successfully connected to Docker daemon");
         }
         Some(service)
     } else {
-        tracing::info!("Docker management disabled (set ENABLE_DOCKER_MANAGER=true to enable)");
+        tracing::info!("🐳 Docker management DISABLED (set ENABLE_DOCKER_MANAGER=true to enable)");
         None
     };
 
@@ -91,6 +107,7 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
         search,
         transcode_semaphore,
         docker_service,
+        ai_service,
     };
 
     routes::create_router(state).await
