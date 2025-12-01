@@ -424,10 +424,16 @@ pub fn detect_gpu_support() -> GpuAcceleration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    
+    // 使用 mutex 確保環境變數測試序列化執行
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
     
     #[test]
     fn test_gpu_from_env() {
-        // SAFETY: This test runs in a single thread and we're only setting env vars for testing
+        let _lock = ENV_MUTEX.lock().unwrap();
+        
+        // SAFETY: This test runs with a mutex lock and we're only setting env vars for testing
         unsafe {
             std::env::set_var("FFMPEG_GPU_ACCEL", "nvidia");
         }
@@ -437,5 +443,179 @@ mod tests {
             std::env::set_var("FFMPEG_GPU_ACCEL", "none");
         }
         assert_eq!(GpuAcceleration::from_env(), GpuAcceleration::None);
+        
+        // Reset to default
+        unsafe {
+            std::env::remove_var("FFMPEG_GPU_ACCEL");
+        }
+    }
+    
+    #[test]
+    fn test_gpu_acceleration_variants() {
+        assert!(GpuAcceleration::Nvidia.is_enabled());
+        assert!(GpuAcceleration::Intel.is_enabled());
+        assert!(GpuAcceleration::Amd.is_enabled());
+        assert!(!GpuAcceleration::None.is_enabled());
+    }
+    
+    #[test]
+    fn test_hls_quality_presets() {
+        let q1080 = HlsQuality::preset_1080p();
+        assert_eq!(q1080.name, "1080p");
+        assert_eq!(q1080.width, 1920);
+        assert_eq!(q1080.height, 1080);
+        
+        let q720 = HlsQuality::preset_720p();
+        assert_eq!(q720.name, "720p");
+        assert_eq!(q720.width, 1280);
+        assert_eq!(q720.height, 720);
+        
+        // Test from_name
+        assert!(HlsQuality::from_name("1080p").is_some());
+        assert!(HlsQuality::from_name("1080").is_some());
+        assert!(HlsQuality::from_name("invalid").is_none());
+        
+        // All presets
+        let all = HlsQuality::all_presets();
+        assert_eq!(all.len(), 4);
+    }
+    
+    /// Helper to get args from Command
+    fn get_command_args(cmd: &Command) -> Vec<String> {
+        let debug_str = format!("{:?}", cmd);
+        // Parse args from debug output - this is a workaround since Command doesn't expose args directly
+        // Format: "ffmpeg" "-hwaccel" "cuda" ...
+        let mut args = Vec::new();
+        let mut in_quote = false;
+        let mut current = String::new();
+        
+        for ch in debug_str.chars() {
+            match ch {
+                '"' => {
+                    if in_quote && !current.is_empty() {
+                        args.push(current.clone());
+                        current.clear();
+                    }
+                    in_quote = !in_quote;
+                }
+                _ if in_quote => {
+                    current.push(ch);
+                }
+                _ => {}
+            }
+        }
+        args
+    }
+    
+    #[test]
+    fn test_transcode_command_cpu() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // Force CPU mode
+        unsafe { std::env::set_var("FFMPEG_GPU_ACCEL", "none"); }
+        
+        let ffmpeg = FfmpegCommand::new("/path/to/input.mp4");
+        let cmd = ffmpeg.transcode("1280x720");
+        let args = get_command_args(&cmd);
+        
+        // Should contain input file
+        assert!(args.contains(&"/path/to/input.mp4".to_string()), "Should have input path");
+        // Should use libx264 for CPU
+        assert!(args.contains(&"libx264".to_string()), "Should use libx264 for CPU");
+        // Should have scale filter
+        assert!(args.iter().any(|a| a.contains("1280x720")), "Should have resolution");
+        
+        unsafe { std::env::remove_var("FFMPEG_GPU_ACCEL"); }
+    }
+    
+    #[test]
+    fn test_transcode_command_nvidia() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var("FFMPEG_GPU_ACCEL", "nvidia"); }
+        
+        let ffmpeg = FfmpegCommand::new("/path/to/input.mp4");
+        let cmd = ffmpeg.transcode("1920x1080");
+        let args = get_command_args(&cmd);
+        
+        // Should use NVENC
+        assert!(args.contains(&"h264_nvenc".to_string()), "Should use h264_nvenc for NVIDIA");
+        // Should have hwaccel cuda
+        assert!(args.contains(&"cuda".to_string()), "Should have CUDA hwaccel");
+        
+        unsafe { std::env::remove_var("FFMPEG_GPU_ACCEL"); }
+    }
+    
+    #[test]
+    fn test_thumbnail_command() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var("FFMPEG_GPU_ACCEL", "none"); }
+        
+        let ffmpeg = FfmpegCommand::new("/path/to/video.mp4");
+        let cmd = ffmpeg.thumbnail("/output/thumb.jpg", 800);
+        let args = get_command_args(&cmd);
+        
+        // Should have input
+        assert!(args.contains(&"/path/to/video.mp4".to_string()));
+        // Should have output
+        assert!(args.contains(&"/output/thumb.jpg".to_string()));
+        // Should extract 1 frame
+        assert!(args.contains(&"1".to_string()));
+        // Should have -frames:v
+        assert!(args.iter().any(|a| a.contains("frames")));
+        
+        unsafe { std::env::remove_var("FFMPEG_GPU_ACCEL"); }
+    }
+    
+    #[test]
+    fn test_hls_command() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var("FFMPEG_GPU_ACCEL", "none"); }
+        
+        let ffmpeg = FfmpegCommand::new("/path/to/video.mp4");
+        let quality = HlsQuality::preset_720p();
+        let cmd = ffmpeg.generate_hls("/output/hls", &quality);
+        let args = get_command_args(&cmd);
+        
+        // Should have HLS format
+        assert!(args.contains(&"hls".to_string()), "Should have HLS format");
+        // Should have segment time
+        assert!(args.contains(&"6".to_string()), "Should have 6 second segments");
+        // Should have playlist type
+        assert!(args.contains(&"vod".to_string()), "Should be VOD type");
+        
+        unsafe { std::env::remove_var("FFMPEG_GPU_ACCEL"); }
+    }
+    
+    #[test]
+    fn test_proxy_command() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var("FFMPEG_GPU_ACCEL", "none"); }
+        
+        let ffmpeg = FfmpegCommand::new("/path/to/gopro.mp4");
+        let cmd = ffmpeg.generate_proxy("/output/proxy.mp4", 720, 2000);
+        let args = get_command_args(&cmd);
+        
+        // Should have bitrate
+        assert!(args.iter().any(|a| a.contains("2000k")), "Should have 2000k bitrate");
+        // Should have faststart for streaming
+        assert!(args.contains(&"+faststart".to_string()), "Should have faststart");
+        
+        unsafe { std::env::remove_var("FFMPEG_GPU_ACCEL"); }
+    }
+    
+    #[test]
+    fn test_transcode_stream_outputs_to_stdout() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var("FFMPEG_GPU_ACCEL", "none"); }
+        
+        let ffmpeg = FfmpegCommand::new("/path/to/input.mp4");
+        let cmd = ffmpeg.transcode_stream("1280x720");
+        let args = get_command_args(&cmd);
+        
+        // Should output to stdout (-)
+        assert!(args.contains(&"-".to_string()), "Should output to stdout");
+        // Should use matroska format for streaming
+        assert!(args.contains(&"matroska".to_string()), "Should use matroska format");
+        
+        unsafe { std::env::remove_var("FFMPEG_GPU_ACCEL"); }
     }
 }

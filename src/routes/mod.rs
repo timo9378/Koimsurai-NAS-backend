@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, post, any},
+    routing::{get, post, any, delete},
     Router,
     middleware,
 };
@@ -8,7 +8,7 @@ use tower_sessions_sqlx_store::SqliteStore;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use crate::state::AppState;
-use crate::handlers::{auth, file, share, system, webdav, media, trash, permission, ws, job, upload, tag, audit, version, search};
+use crate::handlers::{auth, file, share, system, webdav, media, trash, permission, ws, job, upload, tag, audit, version, search, docker};
 use crate::middleware::auth::require_auth;
 
 
@@ -125,12 +125,31 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/search", get(search::search_files))
         .layer(middleware::from_fn(require_auth)); // Protect file routes
 
+    // Docker 管理路由（需要認證）
+    let docker_routes = Router::new()
+        .route("/status", get(docker::docker_status))
+        .route("/connect", post(docker::docker_connect))
+        // 容器操作
+        .route("/containers", get(docker::list_containers))
+        .route("/containers/:id", get(docker::inspect_container).delete(docker::remove_container))
+        .route("/containers/:id/start", post(docker::start_container))
+        .route("/containers/:id/stop", post(docker::stop_container))
+        .route("/containers/:id/restart", post(docker::restart_container))
+        .route("/containers/:id/logs", get(docker::container_logs))
+        .route("/containers/:id/stats", get(docker::container_stats))
+        // 鏡像操作
+        .route("/images", get(docker::list_images))
+        .route("/images/pull", post(docker::pull_image))
+        .route("/images/:id", delete(docker::remove_image))
+        .layer(middleware::from_fn(require_auth)); // Protect docker routes
+
 
 
     Router::new()
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
         .nest("/api/auth", auth_routes)
         .nest("/api", file_routes)
+        .nest("/api/docker", docker_routes)
         .route("/s/:id", get(share::access_share_link)) // Public share link
         .route("/webdav", any(webdav::webdav_handler))
         .route("/webdav/*path", any(webdav::webdav_handler))

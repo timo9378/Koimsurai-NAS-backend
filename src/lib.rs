@@ -12,11 +12,12 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use dav_server::{localfs::LocalFs, DavHandler};
 use tokio::sync::Semaphore;
-use crate::state::{AppState, get_max_concurrent_transcodes};
+use crate::state::{AppState, get_max_concurrent_transcodes, get_docker_enabled};
 use crate::utils::queue::{JobQueue, worker};
 use crate::services::indexer::Indexer;
 use crate::services::audit::AuditService;
 use crate::services::search::SearchService;
+use crate::services::docker::DockerService;
 use sqlx::SqlitePool;
 
 pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router {
@@ -64,6 +65,22 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
     tracing::info!("Max concurrent transcodes: {}", max_transcodes);
     let transcode_semaphore = Arc::new(Semaphore::new(max_transcodes));
 
+    // Initialize Docker Service (可選)
+    let docker_service = if get_docker_enabled() {
+        tracing::info!("Docker management enabled");
+        let service = Arc::new(DockerService::new());
+        // 嘗試連接到 Docker daemon
+        if let Err(e) = service.connect().await {
+            tracing::warn!("Failed to connect to Docker daemon: {}. Docker features may not work until manually connected.", e);
+        } else {
+            tracing::info!("Successfully connected to Docker daemon");
+        }
+        Some(service)
+    } else {
+        tracing::info!("Docker management disabled (set ENABLE_DOCKER_MANAGER=true to enable)");
+        None
+    };
+
     let state = AppState {
         pool,
         storage_path,
@@ -73,6 +90,7 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
         audit,
         search,
         transcode_semaphore,
+        docker_service,
     };
 
     routes::create_router(state).await

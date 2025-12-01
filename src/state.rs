@@ -8,6 +8,7 @@ use crate::utils::queue::JobQueue;
 use crate::models::job::JobUpdate;
 use crate::services::audit::AuditService;
 use crate::services::search::SearchService;
+use crate::services::docker::DockerService;
 
 /// 從環境變數取得即時轉碼並發限制
 /// Get transcode concurrency limit from env
@@ -17,6 +18,14 @@ pub fn get_max_concurrent_transcodes() -> usize {
         .unwrap_or_else(|_| "2".to_string())
         .parse()
         .unwrap_or(2)
+}
+
+/// 從環境變數取得是否啟用 Docker 管理功能
+/// Get whether Docker management is enabled from env
+pub fn get_docker_enabled() -> bool {
+    env::var("ENABLE_DOCKER_MANAGER")
+        .map(|v| v.to_lowercase() == "true" || v == "1")
+        .unwrap_or(false)
 }
 
 #[derive(Clone)]
@@ -31,5 +40,8 @@ pub struct AppState {
     /// Semaphore 用於限制同時進行的 FFmpeg 轉碼數量
     /// Semaphore to limit concurrent FFmpeg transcodes
     pub transcode_semaphore: Arc<Semaphore>,
+    /// Docker 容器管理服務（可選）
+    /// Docker container management service (optional)
+    pub docker_service: Option<Arc<DockerService>>,
 }
 
