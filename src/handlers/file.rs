@@ -24,10 +24,26 @@ pub struct RenameRequest {
 
 pub async fn rename_file(
     State(state): State<AppState>,
-    Extension(_user_id): Extension<i64>,
+    Extension(user_id): Extension<i64>,
     AxumPath(path): AxumPath<String>,
     Json(payload): Json<RenameRequest>,
 ) -> Result<StatusCode, AppError> {
+    // Check write permission
+    let has_permission = sqlx::query_scalar::<_, bool>(
+        "SELECT can_write FROM permissions WHERE user_id = ? AND path = ?"
+    )
+    .bind(user_id)
+    .bind(&path)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    if let Some(can_write) = has_permission {
+        if !can_write {
+            return Err(AppError::Status(StatusCode::FORBIDDEN));
+        }
+    }
+
     let old_path = validate_path(&state.storage_path, &path)?;
     let new_path = validate_path(&state.storage_path, &payload.new_path)?;
 
@@ -50,7 +66,7 @@ pub async fn rename_file(
 
     // Audit Log
     let _ = state.audit.log(
-        _user_id,
+        user_id,
         "rename_file",
         &path,
         Some(format!("Renamed to {}", payload.new_path)),
@@ -434,6 +450,22 @@ pub async fn delete_file(
     Extension(user_id): Extension<i64>,
     AxumPath(path): AxumPath<String>,
 ) -> Result<StatusCode, AppError> {
+    // Check write permission
+    let has_permission = sqlx::query_scalar::<_, bool>(
+        "SELECT can_write FROM permissions WHERE user_id = ? AND path = ?"
+    )
+    .bind(user_id)
+    .bind(&path)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    if let Some(can_write) = has_permission {
+        if !can_write {
+            return Err(AppError::Status(StatusCode::FORBIDDEN));
+        }
+    }
+
     let full_path = validate_path(&state.storage_path, &path)?;
     
     if !full_path.exists() {
