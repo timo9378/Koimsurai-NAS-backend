@@ -1,9 +1,9 @@
 //! AI 圖片標籤服務
 //!
-//! 使用 CLIP 或 ResNet 等模型進行圖片智能標籤。
+//! 使用 CLIP 模型進行圖片智能標籤。
 //! 設計為可選功能，透過 ENABLE_AI_LABELLING 環境變數控制。
 //!
-//! 未來可透過 `ort` 或 `candle` crate 整合真實 AI 模型。
+//! 使用 `candle` crate 進行推理，支援 CUDA GPU 加速。
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,17 @@ use sqlx::{Pool, Sqlite};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
+
+#[cfg(feature = "ai")]
+use {
+    candle_core::{Device, Tensor, DType},
+    candle_nn::VarBuilder,
+    candle_transformers::models::clip,
+    hf_hub::{api::sync::Api, Repo, RepoType},
+    tokenizers::Tokenizer,
+    std::sync::RwLock,
+};
 
 /// AI 標籤結果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,28 +56,68 @@ pub struct AiConfig {
     pub max_concurrent_inferences: usize,
     /// 是否使用 GPU
     pub use_gpu: bool,
+    /// 返回的最大標籤數量
+    pub max_tags: usize,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            model_name: "clip-vit-base".to_string(),
+            model_name: "openai/clip-vit-base-patch32".to_string(),
             min_confidence: 0.3,
             max_concurrent_inferences: 4,
             use_gpu: true,
+            max_tags: 5,
         }
     }
 }
 
+/// 預定義的標籤集合 (用於 CLIP zero-shot 分類)
+const PREDEFINED_TAGS: &[&str] = &[
+    // 場景
+    "beach", "forest", "mountain", "city", "countryside", "desert", "ocean", "lake", "river", "sunset",
+    "sunrise", "night", "indoor", "outdoor", "garden", "park", "street", "building", "house", "room",
+    // 動物
+    "cat", "dog", "bird", "fish", "horse", "cow", "sheep", "elephant", "lion", "tiger",
+    "bear", "rabbit", "deer", "butterfly", "insect",
+    // 人物相關
+    "person", "people", "crowd", "portrait", "selfie", "family", "friends", "child", "baby", "group",
+    // 活動
+    "party", "wedding", "birthday", "vacation", "travel", "hiking", "sports", "swimming", "running", "cycling",
+    // 食物
+    "food", "meal", "breakfast", "lunch", "dinner", "dessert", "fruit", "vegetables", "drink", "coffee",
+    // 物品
+    "car", "bicycle", "motorcycle", "boat", "airplane", "train", "phone", "computer", "book", "flower",
+    // 藝術/風格
+    "art", "painting", "drawing", "photography", "black and white", "colorful", "vintage", "modern", "abstract",
+    // 季節/天氣
+    "spring", "summer", "autumn", "winter", "sunny", "cloudy", "rainy", "snowy", "foggy",
+    // 情感
+    "happy", "sad", "romantic", "peaceful", "exciting", "beautiful", "cute", "funny",
+];
+
 /// AI 圖片標籤服務
-///
-/// 目前為 stub 實作，返回空結果。
-/// 未來可整合 `ort` (ONNX Runtime) 或 `candle` 進行真實推理。
 pub struct AiService {
     config: AiConfig,
     pool: Pool<Sqlite>,
     /// 推理信號量，限制同時推理數量
     inference_semaphore: Arc<Semaphore>,
+    /// CLIP 模型 (懶加載)
+    #[cfg(feature = "ai")]
+    clip_model: RwLock<Option<ClipModel>>,
+}
+
+/// CLIP 模型封裝
+#[cfg(feature = "ai")]
+struct ClipModel {
+    vision_model: clip::ClipVisionTransformer,
+    text_model: clip::ClipTextTransformer,
+    tokenizer: Tokenizer,
+    device: Device,
+    /// 預計算的文字嵌入 (標籤)
+    text_embeddings: Tensor,
+    /// 對應的標籤名稱
+    tag_names: Vec<String>,
 }
 
 impl AiService {
@@ -85,6 +135,8 @@ impl AiService {
             config,
             pool,
             inference_semaphore,
+            #[cfg(feature = "ai")]
+            clip_model: RwLock::new(None),
         }
     }
 
@@ -92,7 +144,7 @@ impl AiService {
     pub fn config_from_env() -> AiConfig {
         AiConfig {
             model_name: std::env::var("AI_MODEL_NAME")
-                .unwrap_or_else(|_| "clip-vit-base".to_string()),
+                .unwrap_or_else(|_| "openai/clip-vit-base-patch32".to_string()),
             min_confidence: std::env::var("AI_MIN_CONFIDENCE")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -104,48 +156,191 @@ impl AiService {
             use_gpu: std::env::var("AI_USE_GPU")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
+            max_tags: std::env::var("AI_MAX_TAGS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5),
         }
     }
 
-    /// 偵測圖片標籤 (Stub 實作)
-    ///
-    /// 目前返回空結果。未來整合 AI 模型後會進行真實推理。
-    ///
-    /// # 參數
-    /// - `image_path`: 圖片檔案路徑
-    ///
-    /// # 返回
-    /// - AI 分析結果，包含偵測到的標籤
+    /// 載入 CLIP 模型 (懶加載)
+    #[cfg(feature = "ai")]
+    async fn load_model(&self) -> Result<()> {
+        // 檢查是否已載入
+        {
+            let model = self.clip_model.read().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+            if model.is_some() {
+                return Ok(());
+            }
+        }
+
+        info!("Loading CLIP model: {}", self.config.model_name);
+        let start = std::time::Instant::now();
+
+        // 選擇設備
+        let device = if self.config.use_gpu {
+            match Device::new_cuda(0) {
+                Ok(d) => {
+                    info!("Using CUDA device for AI inference");
+                    d
+                }
+                Err(e) => {
+                    warn!("CUDA not available ({}), falling back to CPU", e);
+                    Device::Cpu
+                }
+            }
+        } else {
+            info!("Using CPU for AI inference");
+            Device::Cpu
+        };
+
+        // 下載模型
+        let api = Api::new()?;
+        let repo = api.repo(Repo::new(self.config.model_name.clone(), RepoType::Model));
+
+        // 載入模型權重
+        let model_file = repo.get("model.safetensors")
+            .or_else(|_| repo.get("pytorch_model.bin"))?;
+        
+        let config_file = repo.get("config.json")?;
+        let tokenizer_file = repo.get("tokenizer.json")?;
+
+        // 解析配置
+        let config_content = std::fs::read_to_string(&config_file)?;
+        let clip_config: clip::ClipConfig = serde_json::from_str(&config_content)?;
+
+        // 載入權重
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, &device)? };
+
+        // 創建視覺模型
+        let vision_model = clip::ClipVisionTransformer::new(vb.pp("vision_model"), &clip_config.vision_config)?;
+        
+        // 創建文字模型
+        let text_model = clip::ClipTextTransformer::new(vb.pp("text_model"), &clip_config.text_config)?;
+
+        // 載入 tokenizer
+        let tokenizer = Tokenizer::from_file(&tokenizer_file)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+        // 預計算所有標籤的文字嵌入
+        let tag_names: Vec<String> = PREDEFINED_TAGS.iter().map(|s| s.to_string()).collect();
+        let text_prompts: Vec<String> = tag_names.iter().map(|t| format!("a photo of {}", t)).collect();
+        
+        // Tokenize 所有標籤
+        let encodings = tokenizer.encode_batch(text_prompts.clone(), true)
+            .map_err(|e| anyhow::anyhow!("Tokenization error: {}", e))?;
+        
+        let max_len = encodings.iter().map(|e| e.get_ids().len()).max().unwrap_or(77);
+        let max_len = max_len.min(77); // CLIP 最大長度
+        
+        let mut input_ids = Vec::new();
+        for encoding in &encodings {
+            let mut ids = encoding.get_ids().to_vec();
+            ids.truncate(max_len);
+            while ids.len() < max_len {
+                ids.push(0);
+            }
+            input_ids.extend(ids);
+        }
+        
+        let input_tensor = Tensor::from_vec(
+            input_ids.iter().map(|&x| x as i64).collect::<Vec<_>>(),
+            (encodings.len(), max_len),
+            &device,
+        )?;
+
+        // 計算文字嵌入
+        let text_embeddings = text_model.forward(&input_tensor)?;
+        
+        // L2 正規化
+        let text_embeddings = Self::l2_normalize(&text_embeddings)?;
+
+        let load_time = start.elapsed();
+        info!("CLIP model loaded in {:?}", load_time);
+
+        // 儲存模型
+        let mut model = self.clip_model.write().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        *model = Some(ClipModel {
+            vision_model,
+            text_model,
+            tokenizer,
+            device,
+            text_embeddings,
+            tag_names,
+        });
+
+        Ok(())
+    }
+
+    /// L2 正規化
+    #[cfg(feature = "ai")]
+    fn l2_normalize(tensor: &Tensor) -> Result<Tensor> {
+        let norm = tensor.sqr()?.sum_keepdim(1)?.sqrt()?;
+        Ok(tensor.broadcast_div(&norm)?)
+    }
+
+    /// 偵測圖片標籤 (帶有 AI feature 時的實作)
+    #[cfg(feature = "ai")]
     pub async fn detect_tags(&self, image_path: &str) -> Result<AiAnalysisResult> {
         // 獲取推理信號量，限制並發
         let _permit = self.inference_semaphore.acquire().await?;
 
         let start = std::time::Instant::now();
-
         debug!("AI analysis requested for: {}", image_path);
 
-        // ========================================
-        // STUB 實作 - 目前返回空結果
-        // 未來可在此整合真實 AI 模型：
-        //
-        // 使用 ort (ONNX Runtime):
-        // ```
-        // use ort::{Session, Environment};
-        // let env = Environment::builder().build()?;
-        // let session = Session::builder(&env)?.with_model("clip.onnx")?;
-        // let outputs = session.run(inputs)?;
-        // ```
-        //
-        // 使用 candle:
-        // ```
-        // use candle_core::{Device, Tensor};
-        // use candle_transformers::models::clip;
-        // let device = Device::new_cuda(0)?;
-        // let model = clip::ClipModel::new(...)?;
-        // ```
-        // ========================================
+        // 確保模型已載入
+        self.load_model().await?;
 
-        let tags: Vec<AiTag> = Vec::new();
+        // 載入並預處理圖片
+        let img = image::open(image_path)?;
+        let img = img.resize_exact(224, 224, image::imageops::FilterType::Triangle);
+        let img = img.to_rgb8();
+
+        // 轉換為 tensor
+        let model = self.clip_model.read().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let model = model.as_ref().ok_or_else(|| anyhow::anyhow!("Model not loaded"))?;
+
+        let mut pixel_values = Vec::new();
+        for pixel in img.pixels() {
+            // 正規化到 [-1, 1] 範圍 (CLIP 標準)
+            pixel_values.push((pixel[0] as f32 / 127.5) - 1.0);
+            pixel_values.push((pixel[1] as f32 / 127.5) - 1.0);
+            pixel_values.push((pixel[2] as f32 / 127.5) - 1.0);
+        }
+
+        let image_tensor = Tensor::from_vec(pixel_values, (1, 3, 224, 224), &model.device)?;
+
+        // 計算圖片嵌入
+        let image_embedding = model.vision_model.forward(&image_tensor)?;
+        let image_embedding = Self::l2_normalize(&image_embedding)?;
+
+        // 計算餘弦相似度
+        let similarities = image_embedding.matmul(&model.text_embeddings.t()?)?;
+        let similarities = similarities.squeeze(0)?;
+
+        // Softmax 轉換為機率
+        let similarities = candle_nn::ops::softmax(&similarities, 0)?;
+        let similarities_vec: Vec<f32> = similarities.to_vec1()?;
+
+        // 收集結果並排序
+        let mut tags: Vec<AiTag> = model.tag_names
+            .iter()
+            .zip(similarities_vec.iter())
+            .map(|(name, &conf)| AiTag {
+                name: name.clone(),
+                confidence: conf,
+            })
+            .collect();
+
+        // 按信心度排序
+        tags.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+
+        // 過濾並取前 N 個
+        let tags: Vec<AiTag> = tags
+            .into_iter()
+            .filter(|t| t.confidence >= self.config.min_confidence)
+            .take(self.config.max_tags)
+            .collect();
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -157,8 +352,36 @@ impl AiService {
         };
 
         debug!(
-            "AI analysis completed for {} in {}ms (stub - no tags)",
-            image_path, duration_ms
+            "AI analysis completed for {} in {}ms ({} tags)",
+            image_path, duration_ms, result.tags.len()
+        );
+
+        Ok(result)
+    }
+
+    /// 偵測圖片標籤 (無 AI feature 時的 stub 實作)
+    #[cfg(not(feature = "ai"))]
+    pub async fn detect_tags(&self, image_path: &str) -> Result<AiAnalysisResult> {
+        // 獲取推理信號量，限制並發
+        let _permit = self.inference_semaphore.acquire().await?;
+
+        let start = std::time::Instant::now();
+        debug!("AI analysis requested for: {} (stub mode - ai feature not enabled)", image_path);
+
+        // Stub 實作 - 返回空結果
+        let tags: Vec<AiTag> = Vec::new();
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let result = AiAnalysisResult {
+            file_path: image_path.to_string(),
+            tags,
+            model_name: format!("{} (stub)", self.config.model_name),
+            duration_ms,
+        };
+
+        warn!(
+            "AI analysis is stub mode for {} - enable 'ai' feature for real inference",
+            image_path
         );
 
         Ok(result)
@@ -172,16 +395,24 @@ impl AiService {
             return self.get_existing_tags(image_path).await;
         }
 
+        // 更新狀態為 processing
+        self.mark_processing(image_path).await?;
+
         // 進行分析
-        let result = self.detect_tags(image_path).await?;
-
-        // 儲存標籤
-        self.save_tags(&result).await?;
-
-        // 更新分析狀態
-        self.mark_analyzed(image_path).await?;
-
-        Ok(result)
+        match self.detect_tags(image_path).await {
+            Ok(result) => {
+                // 儲存標籤
+                self.save_tags(&result).await?;
+                // 更新分析狀態
+                self.mark_analyzed(image_path).await?;
+                Ok(result)
+            }
+            Err(e) => {
+                // 記錄失敗狀態
+                self.mark_failed(image_path, &e.to_string()).await?;
+                Err(e)
+            }
+        }
     }
 
     /// 檢查圖片是否已被分析
@@ -248,6 +479,22 @@ impl AiService {
         Ok(())
     }
 
+    /// 標記圖片為處理中
+    async fn mark_processing(&self, image_path: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO ai_analysis_status (file_path, model_version, status)
+            VALUES (?, ?, 'processing')
+            "#,
+        )
+        .bind(image_path)
+        .bind(&self.config.model_name)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// 標記圖片為已分析
     async fn mark_analyzed(&self, image_path: &str) -> Result<()> {
         sqlx::query(
@@ -260,6 +507,24 @@ impl AiService {
         .bind(&self.config.model_name)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    /// 標記圖片分析失敗
+    async fn mark_failed(&self, image_path: &str, error_msg: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO ai_analysis_status (file_path, model_version, status)
+            VALUES (?, ?, 'failed')
+            "#,
+        )
+        .bind(image_path)
+        .bind(&self.config.model_name)
+        .execute(&self.pool)
+        .await?;
+
+        error!("AI analysis failed for {}: {}", image_path, error_msg);
 
         Ok(())
     }
@@ -364,13 +629,50 @@ impl AiService {
         .await
         .unwrap_or(0);
 
+        let failed_images = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM ai_analysis_status WHERE status = 'failed'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
         Ok(AiStats {
             total_analyzed_images: total_images as u32,
             total_unique_tags: total_tags as u32,
             pending_images: pending_images as u32,
+            failed_images: failed_images as u32,
             model_name: self.config.model_name.clone(),
             gpu_enabled: self.config.use_gpu,
+            #[cfg(feature = "ai")]
+            ai_enabled: true,
+            #[cfg(not(feature = "ai"))]
+            ai_enabled: false,
         })
+    }
+
+    /// 重新分析失敗的圖片
+    pub async fn retry_failed(&self) -> Result<u32> {
+        let failed_paths = sqlx::query_scalar::<_, String>(
+            "SELECT file_path FROM ai_analysis_status WHERE status = 'failed'"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut success_count = 0;
+        for path in failed_paths {
+            // 刪除舊的狀態
+            sqlx::query("DELETE FROM ai_analysis_status WHERE file_path = ?")
+                .bind(&path)
+                .execute(&self.pool)
+                .await?;
+
+            // 重新分析
+            if self.analyze_and_save(&path).await.is_ok() {
+                success_count += 1;
+            }
+        }
+
+        Ok(success_count)
     }
 }
 
@@ -380,8 +682,10 @@ pub struct AiStats {
     pub total_analyzed_images: u32,
     pub total_unique_tags: u32,
     pub pending_images: u32,
+    pub failed_images: u32,
     pub model_name: String,
     pub gpu_enabled: bool,
+    pub ai_enabled: bool,
 }
 
 /// 檢查檔案是否為圖片
@@ -415,10 +719,11 @@ mod tests {
     #[test]
     fn test_ai_config_default() {
         let config = AiConfig::default();
-        assert_eq!(config.model_name, "clip-vit-base");
+        assert_eq!(config.model_name, "openai/clip-vit-base-patch32");
         assert_eq!(config.min_confidence, 0.3);
         assert_eq!(config.max_concurrent_inferences, 4);
         assert!(config.use_gpu);
+        assert_eq!(config.max_tags, 5);
     }
 
     #[test]
@@ -431,5 +736,11 @@ mod tests {
         let json = serde_json::to_string(&tag).unwrap();
         assert!(json.contains("beach"));
         assert!(json.contains("0.95"));
+    }
+
+    #[test]
+    fn test_predefined_tags_not_empty() {
+        assert!(!PREDEFINED_TAGS.is_empty());
+        assert!(PREDEFINED_TAGS.len() >= 50);
     }
 }

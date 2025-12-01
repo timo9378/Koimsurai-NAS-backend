@@ -97,6 +97,29 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
         None
     };
 
+    // Initialize HLS Cleanup Task
+    // 清理 1 小時以上的暫存檔，每 30 分鐘執行一次
+    let hls_cache_dir = storage_path.join(".hls_cache");
+    let hls_max_age = std::time::Duration::from_secs(
+        std::env::var("HLS_CACHE_MAX_AGE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3600) // 預設 1 小時
+    );
+    let hls_cleanup_interval = std::time::Duration::from_secs(
+        std::env::var("HLS_CLEANUP_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1800) // 預設 30 分鐘
+    );
+    
+    tracing::info!(
+        "🧹 HLS cleanup task: max_age={}s, interval={}s",
+        hls_max_age.as_secs(),
+        hls_cleanup_interval.as_secs()
+    );
+    crate::utils::cleanup::spawn_hls_cleanup_task(hls_cache_dir, hls_max_age, hls_cleanup_interval);
+
     let state = AppState {
         pool,
         storage_path,

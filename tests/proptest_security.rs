@@ -7,78 +7,10 @@
 
 use proptest::prelude::*;
 
-// Import the functions we're testing via the library's public API
-// The functions need to be made public in utils/versioning.rs
-mod test_helpers {
-    // Re-implement the validation logic here for testing
-    // since the actual functions might not be public
-    
-    /// 驗證路徑是否安全 (防止路徑穿越攻擊)
-    pub fn validate_path(path: &str) -> bool {
-        let forbidden_patterns = ["..", "//", "\0", "\\"];
-        
-        for pattern in &forbidden_patterns {
-            if path.contains(pattern) {
-                return false;
-            }
-        }
-        
-        if path.starts_with('/') || path.starts_with('~') {
-            return false;
-        }
-        
-        if path.len() >= 2 && path.chars().nth(1) == Some(':') {
-            return false;
-        }
-        
-        let segments: Vec<&str> = path.split('/').collect();
-        for segment in &segments {
-            // Reject single dot segments (current directory reference)
-            if *segment == "." {
-                return false;
-            }
-            if segment.starts_with('.') {
-                if *segment == ".versions" || *segment == ".hls_cache" || *segment == ".trash" {
-                    return false;
-                }
-            }
-        }
-        
-        // Reject paths with only dots
-        if path.chars().all(|c| c == '.') {
-            return false;
-        }
-        
-        true
-    }
-    
-    /// 清理檔案名稱中的危險字元
-    pub fn sanitize_filename(name: &str) -> String {
-        let forbidden_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
-        let mut result = String::with_capacity(name.len());
-        
-        for ch in name.chars() {
-            if forbidden_chars.contains(&ch) {
-                result.push('_');
-            } else {
-                result.push(ch);
-            }
-        }
-        
-        // Also remove .. sequences that might have been created
-        let result = result.replace("..", "__");
-        
-        let result = result.trim_start_matches('.');
-        
-        if result.is_empty() {
-            return "unnamed".to_string();
-        }
-        
-        result.to_string()
-    }
-}
-
-use test_helpers::{validate_path, sanitize_filename};
+// 直接從專案的 utils 模組引入真實的函式
+// 這樣可以確保我們測試的是實際使用的程式碼，而非測試檔內的複製品
+// Note: Cargo package name uses underscore, so we use Koimsurai_NAS
+use Koimsurai_NAS::utils::versioning::{validate_path, sanitize_filename};
 
 proptest! {
     /// Test that validate_path never allows path traversal
