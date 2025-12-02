@@ -5,6 +5,9 @@ use tokio::net::TcpListener;
 use Koimsurai_NAS::{create_app, db};
 use tempfile::TempDir;
 
+/// 測試用的邀請碼
+pub const TEST_INVITE_CODE: &str = "test_invite_code_12345";
+
 pub struct TestApp {
     pub address: String,
     pub pool: SqlitePool,
@@ -12,6 +15,9 @@ pub struct TestApp {
 }
 
 pub async fn spawn_app() -> TestApp {
+    // 設定測試用的邀請碼環境變數
+    std::env::set_var("REGISTRATION_INVITE_CODE", TEST_INVITE_CODE);
+    
     // 使用記憶體資料庫進行測試，或者使用暫存檔案
     // 為了確保隔離性，這裡使用暫存檔案資料庫
     let db_dir = TempDir::new().expect("Failed to create temp dir for db");

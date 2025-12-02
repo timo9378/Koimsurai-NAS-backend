@@ -371,22 +371,28 @@ impl Indexer {
 
         // 使用 debounce 來避免短時間內重複處理同一檔案
         let mut pending_paths: HashSet<PathBuf> = HashSet::new();
-        let mut last_flush = std::time::Instant::now();
-        let flush_interval = std::time::Duration::from_millis(500);
+        let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
 
-        while let Some(res) = rx.recv().await {
-            match res {
-                Ok(event) => {
-                    for path in event.paths {
-                        // Check if it's a hidden file/dir
-                        if path.file_name().map(|s| s.to_string_lossy().starts_with('.')).unwrap_or(false) {
-                            continue;
+        loop {
+            tokio::select! {
+                // 收到新的檔案變更事件
+                Some(res) = rx.recv() => {
+                    match res {
+                        Ok(event) => {
+                            for path in event.paths {
+                                // Check if it's a hidden file/dir
+                                if path.file_name().map(|s| s.to_string_lossy().starts_with('.')).unwrap_or(false) {
+                                    continue;
+                                }
+                                pending_paths.insert(path);
+                            }
                         }
-                        pending_paths.insert(path);
+                        Err(e) => error!("Watch error: {:?}", e),
                     }
-
-                    // Debounce: 每 500ms 處理一次累積的變更
-                    if last_flush.elapsed() >= flush_interval && !pending_paths.is_empty() {
+                }
+                // 定期 flush pending_paths
+                _ = flush_interval.tick() => {
+                    if !pending_paths.is_empty() {
                         for path in pending_paths.drain() {
                             if path.exists() {
                                 if let Err(e) = self.index_file(&path).await {
@@ -398,13 +404,9 @@ impl Indexer {
                                 }
                             }
                         }
-                        last_flush = std::time::Instant::now();
                     }
                 }
-                Err(e) => error!("Watch error: {:?}", e),
             }
         }
-        
-        Ok(())
     }
 }

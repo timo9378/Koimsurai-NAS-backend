@@ -198,10 +198,25 @@ pub async fn list_files(
     let rows = query_builder.fetch_all(&state.pool).await.map_err(AppError::from)?;
 
     let mut files = Vec::new();
+    let mut stale_paths: Vec<String> = Vec::new();
+    
     for (name, is_dir, size, modified, mime_type) in rows {
+        // 驗證檔案是否真的存在
+        // Verify the file actually exists on disk
+        let file_path = state.storage_path.join(&parent_path).join(&name);
+        if !file_path.exists() {
+            // 記錄不存在的檔案，稍後清理
+            let db_path = if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", parent_path, name)
+            };
+            stale_paths.push(db_path);
+            continue; // 跳過這個檔案
+        }
+        
         let metadata = if !is_dir {
             if let Some(ref mime) = mime_type {
-                let file_path = state.storage_path.join(&parent_path).join(&name);
                 crate::utils::metadata::extract_metadata(&file_path, mime)
             } else {
                 crate::utils::metadata::FileMetadata::None
@@ -248,6 +263,25 @@ pub async fn list_files(
             metadata: Some(metadata),
             tags,
             is_starred,
+        });
+    }
+
+    // 異步清理不存在的檔案記錄（不阻塞回應）
+    // Async cleanup of stale file records (non-blocking)
+    if !stale_paths.is_empty() {
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            for path in stale_paths {
+                if let Err(e) = sqlx::query("DELETE FROM files WHERE path = ?")
+                    .bind(&path)
+                    .execute(&pool)
+                    .await
+                {
+                    tracing::error!("Failed to cleanup stale file {}: {}", path, e);
+                } else {
+                    tracing::debug!("Cleaned up stale file record: {}", path);
+                }
+            }
         });
     }
 
@@ -642,4 +676,69 @@ pub async fn batch_copy(
     })?;
 
     Ok(StatusCode::ACCEPTED)
+}
+
+/// 我的最愛檔案資訊（包含 starred_at 時間戳）
+/// Favorite file info with starred_at timestamp
+#[derive(serde::Serialize, ToSchema)]
+pub struct FavoriteFileInfo {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: String,
+    pub mime_type: Option<String>,
+    pub starred_at: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/favorites",
+    responses(
+        (status = 200, description = "取得我的最愛檔案列表 / Get favorites list", body = Vec<FavoriteFileInfo>)
+    )
+)]
+pub async fn list_favorites(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+) -> Result<Json<Vec<FavoriteFileInfo>>, AppError> {
+    // Join file_stars with files to get metadata
+    // 聯結 file_stars 與 files 資料表取得完整資訊
+    let rows = sqlx::query_as::<_, (String, String, bool, i64, chrono::NaiveDateTime, Option<String>, chrono::NaiveDateTime)>(
+        r#"
+        SELECT 
+            f.name,
+            f.path,
+            f.is_dir,
+            f.size,
+            f.modified,
+            f.mime_type,
+            s.created_at as starred_at
+        FROM files f
+        JOIN file_stars s ON f.path = s.file_path
+        WHERE s.user_id = ?
+        ORDER BY s.created_at DESC
+        "#
+    )
+    .bind(user_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    let favorites: Vec<FavoriteFileInfo> = rows
+        .into_iter()
+        .map(|(name, path, is_dir, size, modified, mime_type, starred_at)| {
+            FavoriteFileInfo {
+                name,
+                path,
+                is_dir,
+                size: size as u64,
+                modified: modified.and_utc().timestamp().to_string(),
+                mime_type,
+                starred_at: starred_at.and_utc().timestamp().to_string(),
+            }
+        })
+        .collect();
+
+    Ok(Json(favorites))
 }

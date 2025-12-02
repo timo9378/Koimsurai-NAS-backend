@@ -1,6 +1,6 @@
 mod common;
 
-use common::spawn_app;
+use common::{spawn_app, TEST_INVITE_CODE};
 use reqwest::Client;
 use serde_json::json;
 
@@ -13,7 +13,8 @@ async fn register_works() {
         .post(&format!("{}/api/auth/register", app.address))
         .json(&json!({
             "username": "testuser",
-            "password": "password123"
+            "password": "password123",
+            "invite_code": TEST_INVITE_CODE
         }))
         .send()
         .await
@@ -32,7 +33,8 @@ async fn login_works() {
         .post(&format!("{}/api/auth/register", app.address))
         .json(&json!({
             "username": "testuser",
-            "password": "password123"
+            "password": "password123",
+            "invite_code": TEST_INVITE_CODE
         }))
         .send()
         .await
