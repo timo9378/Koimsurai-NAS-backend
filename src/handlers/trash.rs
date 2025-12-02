@@ -8,6 +8,13 @@ use crate::state::AppState;
 use crate::error::AppError;
 use crate::models::FileInfo;
 
+#[utoipa::path(
+    get,
+    path = "/api/trash",
+    responses(
+        (status = 200, description = "列出垃圾桶中的檔案 / List trash files", body = Vec<FileInfo>)
+    )
+)]
 pub async fn list_trash(
     State(state): State<AppState>,
     Extension(_user_id): Extension<i64>,
@@ -41,6 +48,17 @@ pub async fn list_trash(
     Ok(Json(files))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/trash/{filename}",
+    params(
+        ("filename" = String, Path, description = "要還原的檔案名 / Filename to restore")
+    ),
+    responses(
+        (status = 200, description = "檔案已還原 / File restored"),
+        (status = 404, description = "檔案不存在 / File not found")
+    )
+)]
 pub async fn restore_file(
     State(state): State<AppState>,
     Extension(_user_id): Extension<i64>,
@@ -59,6 +77,13 @@ pub async fn restore_file(
     Ok(StatusCode::OK)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/trash",
+    responses(
+        (status = 200, description = "垃圾桶已清空 / Trash emptied")
+    )
+)]
 pub async fn empty_trash(
     State(state): State<AppState>,
     Extension(_user_id): Extension<i64>,

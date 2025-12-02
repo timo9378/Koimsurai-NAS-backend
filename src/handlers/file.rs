@@ -16,6 +16,86 @@ use crate::error::AppError;
 use tower_http::services::ServeFile;
 use tower::util::ServiceExt; // for oneshot
 use std::path::{Path, Component};
+use utoipa::ToSchema;
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateFolderRequest {
+    /// 父目錄路徑，例如 "Documents"。空字串表示根目錄
+    /// Parent directory path, e.g. "Documents". Empty string means root.
+    pub path: String,
+    /// 新資料夾名稱，例如 "New Folder"
+    /// New folder name, e.g. "New Folder"
+    pub folder_name: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/files/folder",
+    request_body = CreateFolderRequest,
+    responses(
+        (status = 201, description = "資料夾建立成功 / Folder created"),
+        (status = 403, description = "沒有寫入權限 / No write permission"),
+        (status = 409, description = "資料夾已存在 / Folder already exists")
+    )
+)]
+pub async fn create_folder(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
+    Json(payload): Json<CreateFolderRequest>,
+) -> Result<StatusCode, AppError> {
+    // 1. 組合路徑
+    let parent_path = if payload.path.is_empty() || payload.path == "/" {
+        "".to_string()
+    } else {
+        payload.path.trim_start_matches('/').to_string()
+    };
+    
+    let full_relative_path = if parent_path.is_empty() {
+        payload.folder_name.clone()
+    } else {
+        format!("{}/{}", parent_path, payload.folder_name)
+    };
+
+    // 2. 權限檢查 (檢查父目錄是否有寫入權限)
+    let has_permission = sqlx::query_scalar::<_, bool>(
+        "SELECT can_write FROM permissions WHERE user_id = ? AND path = ?"
+    )
+    .bind(user_id)
+    .bind(&parent_path)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    if let Some(can_write) = has_permission {
+        if !can_write {
+            return Err(AppError::Status(StatusCode::FORBIDDEN));
+        }
+    }
+
+    // 3. 驗證並建立實體路徑
+    let target_path = validate_path(&state.storage_path, &full_relative_path)?;
+
+    if target_path.exists() {
+        return Err(AppError::Status(StatusCode::CONFLICT));
+    }
+
+    // 4. 建立資料夾
+    fs::create_dir_all(&target_path).await.map_err(AppError::from)?;
+
+    // 5. 寫入 Audit Log
+    let _ = state.audit.log(
+        user_id,
+        "create_folder",
+        &full_relative_path,
+        Some("Created new directory".to_string()),
+        None
+    ).await;
+
+    // 資料夾會由 file watcher 自動索引到資料庫
+    // Folder will be automatically indexed by file watcher
+
+    Ok(StatusCode::CREATED)
+}
 
 #[derive(Deserialize)]
 pub struct RenameRequest {
@@ -554,8 +634,6 @@ pub async fn delete_file(
 
     Ok(StatusCode::OK)
 }
-
-use utoipa::ToSchema;
 
 #[derive(Deserialize, ToSchema)]
 pub struct BatchOperationRequest {

@@ -30,6 +30,7 @@ use crate::handlers::media::TimelineGroup;
         file::list_files_root,
         file::list_files,
         file::list_favorites,
+        file::create_folder,
         file::download_file,
         file::upload_file_root,
         file::upload_file,
@@ -38,6 +39,9 @@ use crate::handlers::media::TimelineGroup;
         file::batch_delete,
         file::batch_move,
         file::batch_copy,
+        trash::list_trash,
+        trash::restore_file,
+        trash::empty_trash,
         share::create_share_link,
         share::access_share_link,
         system::get_system_status,
@@ -58,7 +62,7 @@ use crate::handlers::media::TimelineGroup;
         media::get_timeline
     ),
     components(
-        schemas(RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo)
+        schemas(RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo, crate::handlers::file::CreateFolderRequest)
     ),
     tags(
         (name = "auth", description = "Authentication endpoints"),
@@ -87,6 +91,7 @@ pub async fn create_router(state: AppState) -> Router {
 
     let file_routes = Router::new()
         .route("/files", get(file::list_files_root))
+        .route("/files/folder", post(file::create_folder))
         .route("/favorites", get(file::list_favorites))
         .route("/files/batch/delete", post(file::batch_delete))
         .route("/files/batch/move", post(file::batch_move))
