@@ -20,6 +20,28 @@ pub async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<StatusCode, AppError> {
+    // === 檢查邀請碼 Check invite code ===
+    let secret_code = std::env::var("REGISTRATION_INVITE_CODE").unwrap_or_default();
+    
+    // 如果沒有設定邀請碼，則不允許任何人註冊
+    // If no invite code is set, registration is disabled
+    if secret_code.is_empty() {
+        return Err(AppError::Custom(
+            StatusCode::FORBIDDEN,
+            "Registration is disabled. No invite code configured.".to_string(),
+        ));
+    }
+    
+    // 如果輸入的邀請碼不正確
+    // If the provided invite code is incorrect
+    if payload.invite_code.as_deref() != Some(secret_code.as_str()) {
+        return Err(AppError::Custom(
+            StatusCode::FORBIDDEN,
+            "Invalid or missing invite code.".to_string(),
+        ));
+    }
+    // ===========================================
+
     // 檢查使用者是否已存在
     // Check if user exists
     let user_exists: Option<(i64,)> = sqlx::query_as(

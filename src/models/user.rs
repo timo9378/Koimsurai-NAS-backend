@@ -16,6 +16,9 @@ pub struct User {
 pub struct RegisterRequest {
     pub username: String,
     pub password: String,
+    /// 邀請碼（必填，用於限制註冊）
+    /// Invite code (required to restrict registration)
+    pub invite_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

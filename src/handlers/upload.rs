@@ -139,6 +139,45 @@ pub async fn upload_chunk(
             .await
             .map_err(AppError::from)?;
 
+        // === 直接寫入 files 資料表 ===
+        // Directly insert into files table
+        let full_relative_path = if session.file_path.is_empty() {
+            session.file_name.clone()
+        } else {
+            format!("{}/{}", session.file_path, session.file_name)
+        };
+        let full_relative_path = full_relative_path.replace('\\', "/");
+        
+        let metadata = tokio::fs::metadata(&final_path).await.map_err(AppError::from)?;
+        let modified = chrono::DateTime::<chrono::Utc>::from(metadata.modified().map_err(AppError::from)?).naive_utc();
+        let mime_type = mime_guess::from_path(&final_path).first_or_octet_stream().to_string();
+        let parent_path = std::path::Path::new(&full_relative_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string().replace('\\', "/"))
+            .unwrap_or_default();
+        
+        sqlx::query(
+            r#"
+            INSERT INTO files (path, name, size, mime_type, parent_path, is_dir, modified)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                size = excluded.size,
+                modified = excluded.modified,
+                mime_type = excluded.mime_type
+            "#
+        )
+        .bind(&full_relative_path)
+        .bind(&session.file_name)
+        .bind(session.total_size)
+        .bind(&mime_type)
+        .bind(&parent_path)
+        .bind(false)
+        .bind(modified)
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::from)?;
+        // ===============================
+
         // Trigger thumbnail generation
         let job_type = crate::utils::queue::JobType::GenerateThumbnail {
             input_path: final_path.clone(),
@@ -146,13 +185,7 @@ pub async fn upload_chunk(
         };
         let _ = state.queue.enqueue(job_type).await;
 
-        // Trigger Indexing
-        let full_relative_path = if session.file_path.is_empty() {
-            session.file_name.clone()
-        } else {
-            format!("{}/{}", session.file_path, session.file_name)
-        };
-
+        // Trigger search indexing
         let index_job = crate::utils::queue::JobType::IndexFile {
             path: full_relative_path
         };

@@ -498,10 +498,17 @@ pub async fn delete_file(
 
     fs::rename(full_path, final_trash_path).await.map_err(AppError::from)?;
 
-    // Audit Log
-    // We need user_id here, but delete_file signature doesn't have it extracted yet.
-    // Let's update the signature to extract user_id.
-    
+    // === 從 files 資料表移除記錄 ===
+    // Remove from files table
+    let normalized_path = path.replace('\\', "/");
+    sqlx::query("DELETE FROM files WHERE path = ? OR path LIKE ?")
+        .bind(&normalized_path)
+        .bind(format!("{}/%", normalized_path)) // 如果是目錄，一併刪除子項目
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::from)?;
+    // ================================
+
     // Audit Log
     let _ = state.audit.log(
         user_id,

@@ -1,1 +1,0 @@
-This is a test file for your new Rust NAS!
