@@ -28,7 +28,8 @@ async fn list_files_works_with_auth() {
         .post(&format!("{}/api/auth/register", app.address))
         .json(&json!({
             "username": "testuser",
-            "password": "password123"
+            "password": "password123",
+            "invite_code": common::TEST_INVITE_CODE
         }))
         .send()
         .await

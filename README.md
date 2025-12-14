@@ -73,6 +73,11 @@
 
 所有 API 端點 (除了 `/api/auth/*`, `/s/*`, `/webdav`) 均需透過 Cookie 進行身分驗證。
 
+### 🧾 OpenAPI
+| 方法 | 路徑 | 描述 |
+|------|------|------|
+| GET | `/scalar` | 取得 Utoipa/OpenAPI JSON，用以產生 API Docs |
+
 ### 🔐 認證 (Authentication)
 | 方法 | 路徑 | 描述 | Body / Query |
 |------|------|------|--------------|
@@ -85,6 +90,7 @@
 |------|------|------|--------------|
 | GET | `/api/files` | 列出根目錄檔案 | `?sort_by=name&order=asc&page=1` |
 | GET | `/api/files/*path` | 列出指定目錄檔案 | `?sort_by=size&limit=50` |
+| POST | `/api/files/folder` | 建立資料夾 | `{ "path": "dir/name" }` |
 | GET | `/api/download/*path` | 下載檔案 | - |
 | PUT | `/api/files/*path` | 重新命名 | `{ "new_path": "new_name.ext" }` |
 | DELETE | `/api/files/*path` | 刪除檔案 (移至垃圾桶) | - |
@@ -92,6 +98,7 @@
 | POST | `/api/files/batch/move` | 批次移動 | `{ "paths": [...], "destination": "dir" }` |
 | POST | `/api/files/batch/copy` | 批次複製 | `{ "paths": [...], "destination": "dir" }` |
 | GET | `/api/thumbnail/:size/*path` | 取得縮圖 | size: `small`, `medium`, `large` |
+| GET | `/api/favorites` | 列出我的最愛 | - |
 
 ### ☁️ 上傳 (Upload)
 | 方法 | 路徑 | 描述 | Body / Query |
@@ -105,21 +112,24 @@
 ### 🏷️ 標籤與收藏 (Tags & Favorites)
 | 方法 | 路徑 | 描述 | Body / Query |
 |------|------|------|--------------|
-| POST | `/api/files/*path/tags` | 新增標籤 | `{ "name": "Work", "color": "#FF0000" }` |
-| DELETE | `/api/files/*path/tags/:tag` | 移除標籤 | - |
-| POST | `/api/files/*path/star` | 切換收藏狀態 | - |
+| POST | `/api/tags/add/*path` | 新增標籤到指定檔案/資料夾 | `{ "name": "Work", "color": "#FF0000" }` |
+| DELETE | `/api/tags/remove/:tag_name/*path` | 從指定檔案/資料夾移除標籤 | - |
+| POST | `/api/star/file/*path` | 切換指定檔案收藏狀態 (Star/Unstar) | - |
 
 ### 🕒 版本控制 (Versioning)
 | 方法 | 路徑 | 描述 | Body / Query |
 |------|------|------|--------------|
-| GET | `/api/files/*path/versions` | 列出歷史版本 | - |
-| POST | `/api/files/*path/restore/:vid` | 還原指定版本 | - |
+| GET | `/api/versions/file/*path` | 列出指定檔案的歷史版本 | - |
+| POST | `/api/versions/restore/:version_id` | 還原指定版本 (以 version_id 還原) | - |
 
 ### 🎬 媒體 (Media)
 | 方法 | 路徑 | 描述 | Body / Query |
 |------|------|------|--------------|
 | GET | `/api/media/stream` | 媒體串流 | `?path=video.mp4&resolution=1080p` |
 | GET | `/api/media/timeline` | 媒體時間軸 | `?group_by=day|month|year` |
+| GET | `/api/media/hls/status` | 查詢 HLS 轉檔/串流狀態 | - |
+| GET | `/api/media/hls/serve` | 以 HLS 方式提供分段串流 | `?path=video.mp4` |
+| GET | `/api/media/hls/qualities` | 列出可用 HLS 解析度/品質 | - |
 
 ### 🔗 分享 (Sharing)
 | 方法 | 路徑 | 描述 | Body / Query |
@@ -143,6 +153,8 @@
 | 方法 | 路徑 | 描述 | Body / Query |
 |------|------|------|--------------|
 | GET | `/api/system/status` | 系統狀態 | CPU, RAM, Disk |
+| POST | `/api/system/verify-consistency` | 驗證資料庫與檔案一致性 (管理員用) | - |
+| POST | `/api/system/rescan` | 觸發資料重新掃描與索引 (管理員用) | - |
 | GET | `/api/tasks` | 背景任務列表 | - |
 | GET | `/api/audit/logs` | 稽核日誌 | - |
 | POST | `/api/permissions` | 設定權限 | `{ "user_id": 1, "path": "...", "can_read": true }` |
@@ -173,18 +185,92 @@
 | DELETE | `/api/docker/images/:id` | 刪除鏡像 | `?force=true` |
 
 ### 🤖 AI 圖片標籤 (AI Smart Tagging)
-類似 Synology Photos 的智慧標籤功能，需設定 `ENABLE_AI_LABELLING=true`。
+後端 AI 圖片標籤服務已在 `src/services/ai.rs` 實作（使用 CLIP，並以 Cargo feature `ai` 控制實際推理），資料表與索引（`image_ai_tags`, `ai_analysis_status`）在 DB migration 已建立。
 
-| 方法 | 路徑 | 描述 | Body / Query |
-|------|------|------|--------------|
-| GET | `/api/search/ai-tags` | AI 標籤搜尋 | `?tag=beach&min_confidence=0.5` |
-| GET | `/api/search/ai-tags/list` | 所有 AI 標籤 | - |
+內部可用的 service/函式:
+- `AiService`：提供 `detect_tags`, `analyze_and_save`, `delete_tags`, `get_stats`, `retry_failed` 等方法，用以分析圖片並將結果寫入 DB。
+- `services::search::search_by_ai_tag(pool, tag, min_confidence, limit)`：在 DB 中搜尋含指定 AI 標籤的圖片。
+- `services::search::get_all_ai_tags(pool)`：取得熱門/現有的 AI 標籤（autocomplete）。
 
-**功能特點**:
-- 使用 CLIP/ResNet 等模型自動識別圖片內容
-- 支援 GPU 加速 (NVIDIA RTX 系列)
-- 可配置信心度門檻過濾低品質標籤
-- 與全文搜尋整合，支援 "tag:beach" 語法
+目前專案尚未把 AI 功能直接暴露成 HTTP 路由；以下為建議可新增到路由的 API：
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| GET | `/api/search/ai-tags` | 以關鍵字搜尋含指定 AI 標籤的圖片（Query: `q`, 可選 `min_confidence`, `limit`） |
+| GET | `/api/search/ai-tags/list` | 取得所有已知 AI 標籤（自動完成用） |
+| POST | `/api/ai/analyze` | 針對單張圖片觸發即時分析並儲存結果（Body: `{ "path": "..." }`） |
+| POST | `/api/ai/retry-failed` | 重新分析失敗的圖片（回傳成功數量） |
+
+簡單範例（curl）：
+
+1) 以標籤搜尋圖片
+
+```bash
+curl -sG "http://localhost:3000/api/search/ai-tags" --data-urlencode "q=beach" --data "min_confidence=0.5&limit=20" \
+   -b cookiefile
+```
+
+範例回應：
+```json
+[
+   {"path":"/photos/2025/beach1.jpg","name":"beach1.jpg","tag":"beach","confidence":0.92},
+   {"path":"/photos/2025/beach2.jpg","name":"beach2.jpg","tag":"beach","confidence":0.87}
+]
+```
+
+2) 取得 AI 標籤清單（autocomplete）
+
+```bash
+curl "http://localhost:3000/api/search/ai-tags/list" -b cookiefile
+```
+
+範例回應：
+```json
+[ ["beach", 124], ["cat", 98], ["person", 65] ]
+```
+
+3) 針對單張圖片觸發分析
+
+```bash
+curl -X POST "http://localhost:3000/api/ai/analyze" -H "Content-Type: application/json" -d '{"path":"/photos/2025/beach1.jpg"}' -b cookiefile
+```
+
+範例回應：
+```json
+{
+   "file_path": "/photos/2025/beach1.jpg",
+   "tags": [{"name":"beach","confidence":0.92}],
+   "model_name":"openai/clip-vit-base-patch32",
+   "duration_ms": 310
+}
+```
+
+4) 重新分析失敗項目
+
+```bash
+curl -X POST "http://localhost:3000/api/ai/retry-failed" -b cookiefile
+```
+
+範例回應：
+```json
+{ "reprocessed": 12 }
+```
+
+啟用與設定：
+
+- CLI（開發）啟用範例：
+```bash
+export ENABLE_AI_LABELLING=true
+cargo run --features ai
+```
+- 環境變數（可在 `.env` 或系統環境設定）：
+   - `AI_MODEL_NAME`（預設 `openai/clip-vit-base-patch32`）
+   - `AI_MIN_CONFIDENCE`（預設 `0.3`）
+   - `AI_MAX_CONCURRENT`（預設 `4`）
+   - `AI_USE_GPU`（`true`/`false`）
+   - `AI_MAX_TAGS`（回傳標籤數量上限）
+
+備註：若不在 Cargo features 中啟用 `ai`，`AiService::detect_tags` 會以 stub 模式回傳空結果並記錄警告，資料庫相關查詢與管理函式仍可使用。
 
 ---
 
