@@ -144,6 +144,85 @@ pub async fn rename_file(
 
     fs::rename(old_path, new_path).await.map_err(AppError::from)?;
 
+    // 更新資料庫中的路徑（files、file_tags、file_stars、permissions、share_links、AI tables）
+    // Normalize paths stored in DB (no leading slash)
+    let normalized_old = path.replace('\\', "/").trim_start_matches('/').to_string();
+    let normalized_new = payload.new_path.replace('\\', "/").trim_start_matches('/').to_string();
+
+    // 查出所有受影響的 files 路徑（包含目標本身與子路徑）
+    let like_pattern = format!("{}/%", normalized_old);
+    let affected_paths: Vec<String> = sqlx::query_scalar(
+        "SELECT path FROM files WHERE path = ? OR path LIKE ?"
+    )
+    .bind(&normalized_old)
+    .bind(&like_pattern)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    for old_db_path in affected_paths {
+        let new_db_path = old_db_path.replacen(&normalized_old, &normalized_new, 1);
+        let new_parent = std::path::Path::new(&new_db_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string().replace('\\', "/"))
+            .unwrap_or_default();
+        let new_name = std::path::Path::new(&new_db_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        // 更新 files
+        let _ = sqlx::query(
+            "UPDATE files SET path = ?, parent_path = ?, name = ? WHERE path = ?"
+        )
+        .bind(&new_db_path)
+        .bind(&new_parent)
+        .bind(&new_name)
+        .bind(&old_db_path)
+        .execute(&state.pool)
+        .await;
+
+        // 更新 file_tags
+        let _ = sqlx::query("UPDATE file_tags SET file_path = ? WHERE file_path = ?")
+            .bind(&new_db_path)
+            .bind(&old_db_path)
+            .execute(&state.pool)
+            .await;
+
+        // 更新 file_stars
+        let _ = sqlx::query("UPDATE file_stars SET file_path = ? WHERE file_path = ?")
+            .bind(&new_db_path)
+            .bind(&old_db_path)
+            .execute(&state.pool)
+            .await;
+
+        // 更新 permissions
+        let _ = sqlx::query("UPDATE permissions SET file_path = ? WHERE file_path = ?")
+            .bind(&new_db_path)
+            .bind(&old_db_path)
+            .execute(&state.pool)
+            .await;
+
+        // 更新 share_links
+        let _ = sqlx::query("UPDATE share_links SET file_path = ? WHERE file_path = ?")
+            .bind(&new_db_path)
+            .bind(&old_db_path)
+            .execute(&state.pool)
+            .await;
+
+        // 更新 AI 相關表格
+        let _ = sqlx::query("UPDATE image_ai_tags SET file_path = ? WHERE file_path = ?")
+            .bind(&new_db_path)
+            .bind(&old_db_path)
+            .execute(&state.pool)
+            .await;
+        let _ = sqlx::query("UPDATE ai_analysis_status SET file_path = ? WHERE file_path = ?")
+            .bind(&new_db_path)
+            .bind(&old_db_path)
+            .execute(&state.pool)
+            .await;
+    }
+
     // Audit Log
     let _ = state.audit.log(
         user_id,
@@ -473,16 +552,68 @@ pub async fn upload_file(
             file.write_all(&chunk).await.map_err(AppError::from)?;
         }
 
-        // 觸發縮圖生成任務
-        // Trigger thumbnail generation job
-        let job_type = crate::utils::queue::JobType::GenerateThumbnail {
-            input_path: file_path.clone(),
-            output_path: file_path.clone(), // Worker will handle the actual thumbnail path
+        // NOTE: thumbnail generation will be enqueued after we determine mime_type
+        
+        // ====== 將檔案寫入 files 資料表，並 enqueue 索引（與 upload_chunk 的行為一致） ======
+        let full_relative_path = if path.is_empty() {
+            file_name.clone()
+        } else {
+            format!("{}/{}", path.trim_start_matches('/'), file_name)
         };
+        let full_relative_path = full_relative_path.replace('\\', "/");
 
-        if let Err(e) = state.queue.enqueue(job_type).await {
-            tracing::error!("Failed to enqueue thumbnail job: {}", e);
+        if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
+            if let Ok(modified_time) = metadata.modified() {
+                let modified = chrono::DateTime::<chrono::Utc>::from(modified_time).naive_utc();
+                let mime_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
+                let parent_path = std::path::Path::new(&full_relative_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string().replace('\\', "/"))
+                    .unwrap_or_default();
+
+                // Insert or update files table
+                if let Err(e) = sqlx::query(
+                    r#"
+                    INSERT INTO files (path, name, size, mime_type, parent_path, is_dir, modified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                        size = excluded.size,
+                        modified = excluded.modified,
+                        mime_type = excluded.mime_type
+                    "#,
+                )
+                .bind(&full_relative_path)
+                .bind(&file_name)
+                .bind(metadata.len() as i64)
+                .bind(&mime_type)
+                .bind(&parent_path)
+                .bind(false)
+                .bind(modified)
+                .execute(&state.pool)
+                .await
+                {
+                    tracing::error!("Failed to insert/update files table for {}: {:?}", full_relative_path, e);
+                } else {
+                    // Enqueue index job
+                    let index_job = crate::utils::queue::JobType::IndexFile { path: full_relative_path.clone() };
+                    if let Err(e) = state.queue.enqueue(index_job).await {
+                        tracing::error!("Failed to enqueue index job for {}: {}", full_relative_path, e);
+                    }
+
+                    // Enqueue thumbnail generation only for images or videos
+                    if mime_type.starts_with("image/") || mime_type.starts_with("video/") {
+                        let thumb_job = crate::utils::queue::JobType::GenerateThumbnail {
+                            input_path: file_path.clone(),
+                            output_path: file_path.clone(),
+                        };
+                        if let Err(e) = state.queue.enqueue(thumb_job).await {
+                            tracing::error!("Failed to enqueue thumbnail job for {}: {}", full_relative_path, e);
+                        }
+                    }
+                }
+            }
         }
+        // ======================================================================
     }
 
     Ok(StatusCode::CREATED)

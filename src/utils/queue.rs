@@ -108,6 +108,7 @@ pub async fn worker(
     tx: broadcast::Sender<JobUpdate>,
     search_service: Arc<SearchService>,
     ai_service: Option<Arc<AiService>>,
+    storage_root: std::path::PathBuf,
 ) {
     info!("Job worker started (AI service: {})", if ai_service.is_some() { "enabled" } else { "disabled" });
     while let Some(job) = receiver.recv().await {
@@ -144,19 +145,15 @@ pub async fn worker(
                     Err(e) => Err(format!("Failed to execute ffmpeg: {}", e)),
                 }
             }
-            JobType::GenerateThumbnail { input_path, output_path } => {
-                // 使用支援 GPU 加速的縮圖生成
-                use crate::utils::ffmpeg::FfmpegCommand;
-                
-                let ffmpeg = FfmpegCommand::new(&input_path.to_string_lossy());
-                let mut cmd = ffmpeg.thumbnail(&output_path.to_string_lossy(), 800); // 800px 預設
-                let status = cmd.status();
+            JobType::GenerateThumbnail { input_path, output_path: _ } => {
+                // Use the higher-level thumbnail generator which writes to
+                // storage/.thumbnails/<relative_parent>/<file>.<size>.jpg for all sizes.
+                // This avoids trying to overwrite the input file and centralises logic.
+                use crate::utils::image;
 
-                match status {
-                    Ok(s) if s.success() => Ok(()),
-                    Ok(s) => Err(format!("Thumbnail generation failed with status: {}", s)),
-                    Err(e) => Err(format!("Failed to execute ffmpeg: {}", e)),
-                }
+                // Call the async helper which will spawn a blocking task.
+                image::generate_thumbnails(input_path.clone(), storage_root.clone()).await;
+                Ok(())
             }
             JobType::GenerateVideoProxy { input_path, output_path, target_height, bitrate_kbps } => {
                 // 為高碼率影片（如 GoPro）生成低碼率 proxy

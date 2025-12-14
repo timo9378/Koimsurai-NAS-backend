@@ -62,10 +62,11 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
         None
     };
 
-    // Spawn worker (傳遞 ai_service)
+    // Spawn worker (傳遞 ai_service + storage_path)
     let search_clone = search.clone();
     let ai_clone = ai_service.clone();
-    tokio::spawn(worker(receiver, pool.clone(), tx.clone(), search_clone, ai_clone));
+    let storage_clone = storage_path.clone();
+    tokio::spawn(worker(receiver, pool.clone(), tx.clone(), search_clone, ai_clone, storage_clone));
 
     // Initialize WebDAV
     let webdav = DavHandler::builder()
