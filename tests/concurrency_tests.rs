@@ -143,13 +143,23 @@ async fn test_concurrent_append_operations() {
             barrier.wait().await;
 
             let content = format!("Line {}\n", i);
-            let mut file = tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&file_path)
-                .await
-                .unwrap();
-
-            file.write_all(content.as_bytes()).await.unwrap();
+            // Use blocking std::fs append inside spawn_blocking to ensure a single
+            // blocking write syscall per append, avoiding async write interleaving.
+            let path = file_path.clone();
+            let data = content.into_bytes();
+            let _ = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)?;
+                f.write_all(&data)?;
+                f.sync_all()?;
+                Ok(())
+            })
+            .await
+            .unwrap()
+            .unwrap();
         }));
     }
 

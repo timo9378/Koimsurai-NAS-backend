@@ -12,6 +12,10 @@ pub struct InitUploadRequest {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct InitUploadResponse {
     pub upload_id: String,
+    /// 已上傳的位元組數（若為 resume 則回傳目前已上傳大小）
+    pub uploaded_size: Option<i64>,
+    /// status: "created" | "resuming"
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow, ToSchema)]

@@ -14,6 +14,57 @@ pub async fn generate_thumbnails(file_path: std::path::PathBuf, storage_root: st
     });
 }
 
+/// Quick check based on file signature (magic bytes) to guess if a file is an image or video.
+/// This is used to avoid running ffmpeg on non-media files (zip, txt, etc.).
+pub fn is_likely_media(file_path: &std::path::Path) -> bool {
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut f = match File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut buf = [0u8; 16];
+    let n = match f.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+
+    let s = &buf[..n];
+
+    // PNG
+    if s.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return true;
+    }
+    // JPEG
+    if s.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return true;
+    }
+    // GIF
+    if s.starts_with(b"GIF8") {
+        return true;
+    }
+    // WebP (RIFF....WEBP)
+    if n >= 12 && &s[0..4] == b"RIFF" && &s[8..12] == b"WEBP" {
+        return true;
+    }
+    // MP4 / MOV (ftyp) - many boxes start with 4-byte size then 'ftyp'
+    if n >= 8 && &s[4..8] == b"ftyp" {
+        return true;
+    }
+    // MKV (EBML)
+    if s.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return true;
+    }
+    // AVI (RIFF....AVI )
+    if n >= 12 && &s[0..4] == b"RIFF" && &s[8..12] == b"AVI " {
+        return true;
+    }
+
+    false
+}
+
 fn generate_thumbnails_sync(file_path: &std::path::Path, storage_root: &std::path::Path) {
     // 計算相對路徑
     let relative_path = match file_path.strip_prefix(storage_root) {

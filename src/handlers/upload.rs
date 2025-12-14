@@ -32,10 +32,36 @@ pub async fn init_upload(
         tokio::fs::create_dir_all(&target_dir).await.map_err(AppError::from)?;
     }
 
-    // Check if file already exists
+    // Check if file already exists (completed file)
     let file_path = target_dir.join(&payload.file_name);
     if file_path.exists() {
         return Err(AppError::Status(StatusCode::CONFLICT));
+    }
+
+    // Check for existing upload session for same user + path + name
+    if let Some(existing) = sqlx::query_as::<_, UploadSession>(
+        "SELECT * FROM upload_sessions WHERE user_id = ? AND file_path = ? AND file_name = ?"
+    )
+    .bind(user_id)
+    .bind(&payload.file_path)
+    .bind(&payload.file_name)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from)? {
+        // If total_size matches, resume
+        if existing.total_size == payload.total_size {
+            return Ok(Json(InitUploadResponse {
+                upload_id: existing.id,
+                uploaded_size: Some(existing.uploaded_size),
+                status: Some("resuming".to_string()),
+            }));
+        } else {
+            // Different size: remove old session and start new
+            let _ = sqlx::query("DELETE FROM upload_sessions WHERE id = ?")
+                .bind(&existing.id)
+                .execute(&state.pool)
+                .await;
+        }
     }
 
     let upload_id = Uuid::new_v4().to_string();
@@ -52,7 +78,7 @@ pub async fn init_upload(
     .await
     .map_err(AppError::from)?;
 
-    Ok(Json(InitUploadResponse { upload_id }))
+    Ok(Json(InitUploadResponse { upload_id, uploaded_size: Some(0), status: Some("created".to_string()) }))
 }
 
 #[utoipa::path(
@@ -70,7 +96,7 @@ pub async fn init_upload(
 pub async fn upload_chunk(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<StatusCode, AppError> {
     // 1. Get session info
@@ -92,6 +118,28 @@ pub async fn upload_chunk(
         tokio::fs::create_dir_all(&temp_dir).await.map_err(AppError::from)?;
     }
     let temp_file_path = temp_dir.join(&id);
+
+    // If client provided a Content-Range header, validate offset matches session.uploaded_size
+    if let Some(range_val) = headers.get("content-range").and_then(|v| v.to_str().ok()) {
+        // Expect format: bytes start-end/total
+        if let Some(rest) = range_val.strip_prefix("bytes ") {
+            if let Some(range_part) = rest.split('/').next() {
+                if let Some(start_str) = range_part.split('-').next() {
+                    if let Ok(start_val) = start_str.parse::<i64>() {
+                        if start_val != session.uploaded_size {
+                            return Err(AppError::Custom(StatusCode::CONFLICT, format!("Offset mismatch: session has {} but upload started at {}", session.uploaded_size, start_val)));
+                        }
+                    }
+                }
+            }
+        }
+    } else if let Some(offset_val) = headers.get("x-upload-offset").and_then(|v| v.to_str().ok()) {
+        if let Ok(start_val) = offset_val.parse::<i64>() {
+            if start_val != session.uploaded_size {
+                return Err(AppError::Custom(StatusCode::CONFLICT, format!("Offset mismatch: session has {} but upload started at {}", session.uploaded_size, start_val)));
+            }
+        }
+    }
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -178,12 +226,15 @@ pub async fn upload_chunk(
         .map_err(AppError::from)?;
         // ===============================
 
-        // Trigger thumbnail generation
-        let job_type = crate::utils::queue::JobType::GenerateThumbnail {
-            input_path: final_path.clone(),
-            output_path: final_path.clone(),
-        };
-        let _ = state.queue.enqueue(job_type).await;
+        // Trigger thumbnail generation only for detected images/videos
+        let mime_type = mime_guess::from_path(&final_path).first_or_octet_stream().to_string();
+        if mime_type.starts_with("image/") || mime_type.starts_with("video/") || crate::utils::image::is_likely_media(&final_path) {
+            let job_type = crate::utils::queue::JobType::GenerateThumbnail {
+                input_path: final_path.clone(),
+                output_path: final_path.clone(),
+            };
+            let _ = state.queue.enqueue(job_type).await;
+        }
 
         // Trigger search indexing
         let index_job = crate::utils::queue::JobType::IndexFile {

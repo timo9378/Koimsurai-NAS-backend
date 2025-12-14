@@ -600,8 +600,8 @@ pub async fn upload_file(
                         tracing::error!("Failed to enqueue index job for {}: {}", full_relative_path, e);
                     }
 
-                    // Enqueue thumbnail generation only for images or videos
-                    if mime_type.starts_with("image/") || mime_type.starts_with("video/") {
+                    // Enqueue thumbnail generation only for detected images/videos
+                    if mime_type.starts_with("image/") || mime_type.starts_with("video/") || crate::utils::image::is_likely_media(&file_path) {
                         let thumb_job = crate::utils::queue::JobType::GenerateThumbnail {
                             input_path: file_path.clone(),
                             output_path: file_path.clone(),
