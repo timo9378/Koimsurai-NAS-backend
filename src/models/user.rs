@@ -28,6 +28,14 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct AuthResponse {
+pub struct EmptyResponse {}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct RefreshToken {
+    pub id: i64,
+    pub user_id: i64,
     pub token: String,
+    pub expires_at: NaiveDateTime,
+    pub revoked: bool,
+    pub created_at: NaiveDateTime,
 }

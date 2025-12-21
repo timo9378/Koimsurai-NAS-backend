@@ -1,6 +1,4 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use Koimsurai_NAS::{create_app, db};
 use tempfile::TempDir;
@@ -10,13 +8,17 @@ pub const TEST_INVITE_CODE: &str = "test_invite_code_12345";
 
 pub struct TestApp {
     pub address: String,
-    pub pool: SqlitePool,
-    pub storage_dir: TempDir,
+    pub _pool: SqlitePool,
+    pub _storage_dir: TempDir,
 }
 
 pub async fn spawn_app() -> TestApp {
     // 設定測試用的邀請碼環境變數
     std::env::set_var("REGISTRATION_INVITE_CODE", TEST_INVITE_CODE);
+    // 設定 JWT secret，避免在測試中呼叫產生或驗證 token 時 panic
+    std::env::set_var("JWT_SECRET", "test_jwt_secret_for_tests");
+    // 為測試環境關閉 secure cookie 標記，讓 HTTP 測試能讀取 cookie
+    std::env::set_var("COOKIE_SECURE", "false");
     
     // 使用記憶體資料庫進行測試，或者使用暫存檔案
     // 為了確保隔離性，這裡使用暫存檔案資料庫
@@ -42,9 +44,5 @@ pub async fn spawn_app() -> TestApp {
         axum::serve(listener, app).await.unwrap();
     });
 
-    TestApp {
-        address,
-        pool,
-        storage_dir, // 保持 TempDir 存活直到 TestApp 被釋放
-    }
+    TestApp { address, _pool: pool, _storage_dir: storage_dir }
 }

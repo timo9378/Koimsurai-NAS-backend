@@ -14,6 +14,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros", "chrono"] }
 argon2 = "0.5"
+jsonwebtoken = "9.3"
 tower-sessions = "0.12"
 axum-extra = { version = "0.9", features = ["cookie"] }
 anyhow = "1.0"
@@ -48,6 +49,7 @@ candle-nn = { version = "0.8", optional = true }
 candle-transformers = { version = "0.8", optional = true }
 hf-hub = { version = "0.3", optional = true }
 tokenizers = { version = "0.21", optional = true }
+time = "0.3.44"
 
 [features]
 default = []

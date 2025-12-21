@@ -13,7 +13,7 @@ use crate::middleware::auth::require_auth;
 
 
 
-use crate::models::{RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, InitUploadRequest, InitUploadResponse, UploadSession, Tag};
+use crate::models::{RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, InitUploadRequest, InitUploadResponse, UploadSession, Tag};
 use crate::handlers::tag::AddTagRequest;
 use crate::services::audit::AuditLog;
 use crate::utils::versioning::FileVersion;
@@ -27,6 +27,7 @@ use crate::handlers::media::TimelineGroup;
         auth::register,
         auth::login,
         auth::logout,
+        auth::refresh,
         file::list_files_root,
         file::list_files,
         file::list_favorites,
@@ -62,7 +63,7 @@ use crate::handlers::media::TimelineGroup;
         media::get_timeline
     ),
     components(
-        schemas(RegisterRequest, LoginRequest, AuthResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo, crate::handlers::file::CreateFolderRequest)
+        schemas(RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo, crate::handlers::file::CreateFolderRequest)
     ),
     tags(
         (name = "auth", description = "Authentication endpoints"),
@@ -87,7 +88,8 @@ pub async fn create_router(state: AppState) -> Router {
     let auth_routes = Router::new()
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
-        .route("/logout", post(auth::logout));
+        .route("/logout", post(auth::logout))
+        .route("/refresh", post(auth::refresh));
 
     let file_routes = Router::new()
         .route("/files", get(file::list_files_root))

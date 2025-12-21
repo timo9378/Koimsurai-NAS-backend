@@ -73,6 +73,7 @@ impl Default for AiConfig {
 }
 
 /// 預定義的標籤集合 (用於 CLIP zero-shot 分類)
+#[cfg(feature = "ai")]
 const PREDEFINED_TAGS: &[&str] = &[
     // 場景
     "beach", "forest", "mountain", "city", "countryside", "desert", "ocean", "lake", "river", "sunset",
@@ -738,6 +739,7 @@ mod tests {
         assert!(json.contains("0.95"));
     }
 
+    #[cfg(feature = "ai")]
     #[test]
     fn test_predefined_tags_not_empty() {
         assert!(!PREDEFINED_TAGS.is_empty());

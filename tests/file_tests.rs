@@ -45,7 +45,18 @@ async fn list_files_works_with_auth() {
         .await
         .expect("Failed to login");
 
-    // List files
+    // Login (cookie-based: access_token will be set as HttpOnly cookie)
+    client
+        .post(&format!("{}/api/auth/login", app.address))
+        .json(&json!({
+            "username": "testuser",
+            "password": "password123"
+        }))
+        .send()
+        .await
+        .expect("Failed to login");
+
+    // List files (cookie will be sent automatically)
     let response = client
         .get(&format!("{}/api/files", app.address))
         .send()

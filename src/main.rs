@@ -13,6 +13,12 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Fail-fast if JWT_SECRET is not configured — prevents runtime login errors.
+    if std::env::var("JWT_SECRET").is_err() {
+        tracing::error!("JWT_SECRET environment variable is not set. Set it in your environment or .env file.");
+        std::process::exit(1);
+    }
+
     // 初始化資料庫
     // Initialize DB
     let pool = db::init_db(None).await.expect("Failed to initialize database");

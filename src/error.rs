@@ -9,6 +9,7 @@ pub enum AppError {
     Status(StatusCode),
     IoError(std::io::Error),
     Custom(StatusCode, String),
+    InternalServerError(String),
 }
 
 impl From<sqlx::Error> for AppError {
@@ -44,6 +45,7 @@ impl IntoResponse for AppError {
             AppError::Status(s) => (s, s.to_string()),
             AppError::IoError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Custom(s, msg) => (s, msg),
+            AppError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
 
         let body = Json(json!({

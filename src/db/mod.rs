@@ -271,6 +271,26 @@ pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // 建立 refresh_tokens 表格 (用於儲存 refresh tokens)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            expires_at DATETIME NOT NULL,
+            revoked BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
     println!("Database initialized successfully");
     Ok(pool)
 }
