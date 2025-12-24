@@ -226,6 +226,7 @@ pub async fn get_timeline(
 
         let file_info = crate::models::FileInfo {
             name,
+            path: full_path,
             is_dir,
             size: size as u64,
             modified: modified.and_utc().timestamp().to_string(),

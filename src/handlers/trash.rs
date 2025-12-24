@@ -31,6 +31,7 @@ pub async fn list_trash(
         if let Ok(metadata) = entry.metadata().await {
             files.push(FileInfo {
                 name: entry.file_name().to_string_lossy().to_string(),
+                path: format!(".trash/{}", entry.file_name().to_string_lossy()),
                 is_dir: metadata.is_dir(),
                 size: metadata.len(),
                 modified: metadata.modified().ok()

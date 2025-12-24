@@ -5,6 +5,7 @@ use crate::utils::metadata::FileMetadata;
 #[derive(Serialize, ToSchema)]
 pub struct FileInfo {
     pub name: String,
+    pub path: String,
     pub is_dir: bool,
     pub size: u64,
     pub modified: String,

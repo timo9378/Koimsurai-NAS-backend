@@ -415,6 +415,7 @@ pub async fn list_files(
 
         files.push(FileInfo {
             name,
+            path: file_db_path.clone(),
             is_dir,
             size: size as u64,
             modified: modified.and_utc().timestamp().to_string(),
