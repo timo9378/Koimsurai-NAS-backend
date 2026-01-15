@@ -521,13 +521,19 @@ pub async fn upload_file(
     AxumPath(path): AxumPath<String>,
     mut multipart: Multipart,
 ) -> Result<StatusCode, AppError> {
+    tracing::info!("upload_file called with path: {:?}", path);
+    
     let target_dir = validate_path(&state.storage_path, &path)?;
+    tracing::info!("Target directory: {:?}", target_dir);
 
     if !target_dir.exists() {
         fs::create_dir_all(&target_dir).await.map_err(AppError::from)?;
     }
 
-    while let Some(mut field) = multipart.next_field().await.map_err(|_| AppError::Status(StatusCode::BAD_REQUEST))? {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!("Failed to get next multipart field: {:?}", e);
+        AppError::Status(StatusCode::BAD_REQUEST)
+    })? {
         let file_name = field.file_name().ok_or(AppError::Status(StatusCode::BAD_REQUEST))?.to_string();
         
         // 防止檔名中的 Path Traversal
@@ -537,6 +543,7 @@ pub async fn upload_file(
         }
 
         let file_path = target_dir.join(&file_name);
+        tracing::info!("Processing file: {} -> {:?}", file_name, file_path);
         
         // 串流寫入檔案，避免佔用過多記憶體
         // Stream write to file to avoid excessive memory usage
@@ -549,9 +556,15 @@ pub async fn upload_file(
 
         let mut file = fs::File::create(&file_path).await.map_err(AppError::from)?;
 
-        while let Some(chunk) = field.chunk().await.map_err(|_| AppError::Status(StatusCode::BAD_REQUEST))? {
+        let mut total_written: usize = 0;
+        while let Some(chunk) = field.chunk().await.map_err(|e| {
+            tracing::error!("Failed to read chunk: {:?}", e);
+            AppError::Status(StatusCode::BAD_REQUEST)
+        })? {
             file.write_all(&chunk).await.map_err(AppError::from)?;
+            total_written += chunk.len();
         }
+        tracing::info!("File {} written successfully, {} bytes", file_name, total_written);
 
         // NOTE: thumbnail generation will be enqueued after we determine mime_type
         

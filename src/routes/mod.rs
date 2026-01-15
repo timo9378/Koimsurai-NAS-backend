@@ -2,6 +2,7 @@ use axum::{
     routing::{get, post, any, delete},
     Router,
     middleware,
+    extract::DefaultBodyLimit,
 };
 use tower_sessions::{SessionManagerLayer, Expiry};
 use tower_sessions_sqlx_store::SqliteStore;
@@ -132,7 +133,9 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/ws", get(ws::ws_handler))
         .route("/audit/logs", get(audit::list_audit_logs))
         .route("/search", get(search::search_files))
-        .layer(middleware::from_fn(require_auth)); // Protect file routes
+        .layer(middleware::from_fn(require_auth)) // Protect file routes
+        // 設置上傳大小限制為 10GB
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10GB
 
     // Docker 管理路由（需要認證）
     let docker_routes = Router::new()

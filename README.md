@@ -203,7 +203,7 @@
 
 簡單範例（curl）：
 
-1) 以標籤搜尋圖片
+1) 以標籤搜尋圖片c
 
 ```bash
 curl -sG "http://localhost:3000/api/search/ai-tags" --data-urlencode "q=beach" --data "min_confidence=0.5&limit=20" \
