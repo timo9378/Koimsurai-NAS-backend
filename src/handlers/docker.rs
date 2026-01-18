@@ -3,10 +3,14 @@
 //! 提供 RESTful API 端點用於管理 Docker 容器和鏡像。
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, ws::{Message, WebSocket, WebSocketUpgrade}},
     http::StatusCode,
+    response::IntoResponse,
     Json,
 };
+use futures::{StreamExt, SinkExt};
+use tokio::io::AsyncWriteExt; // For splitting streams if needed, but bollard returns result with output/input
+
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -485,6 +489,161 @@ pub async fn remove_image(
         .map_err(|e| AppError::Custom(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(DockerResult::<()>::success_message(format!("已刪除鏡像 {}", id))))
+}
+
+// ==================== 網絡操作 ====================
+
+/// 列出所有網絡
+#[utoipa::path(
+    get,
+    path = "/api/docker/networks",
+    responses(
+        (status = 200, description = "List of networks")
+    ),
+    tag = "docker"
+)]
+pub async fn list_networks(
+    State(state): State<AppState>,
+) -> Result<Json<DockerResult<Vec<crate::services::docker::NetworkSummary>>>, AppError> {
+    let service = get_docker_service(&state).await?;
+    ensure_connected(&service).await?;
+
+    let networks = service
+        .list_networks()
+        .await
+        .map_err(|e| AppError::Custom(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(DockerResult::success(networks)))
+}
+
+// ==================== Exec 操作 ====================
+
+/// 連接容器終端機 (WebSocket)
+#[utoipa::path(
+    get,
+    path = "/api/docker/containers/{id}/exec",
+    params(
+        ("id" = String, Path, description = "Container ID or name")
+    ),
+    responses(
+        (status = 101, description = "Switching Protocols (WebSocket)"),
+        (status = 404, description = "Container not found")
+    ),
+    tag = "docker"
+)]
+pub async fn container_exec(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let service = get_docker_service(&state).await?;
+    ensure_connected(&service).await?;
+
+    // 1. 創建 Exec 實例
+    // 使用預設 shell，如果失敗可以嘗試 sh
+    let cmd = vec!["/bin/bash".to_string()];
+    let exec_id = match service.create_exec(&id, cmd.clone()).await {
+        Ok(id) => id,
+        Err(_) => {
+             // Fallback to sh
+             service.create_exec(&id, vec!["/bin/sh".to_string()])
+                .await
+                .map_err(|e| AppError::Custom(
+                    StatusCode::INTERNAL_SERVER_ERROR, 
+                    format!("Failed to create exec instance: {}", e)
+                ))?
+        }
+    };
+
+    Ok(ws.on_upgrade(move |socket| handle_exec_socket(socket, state, exec_id)))
+}
+
+async fn handle_exec_socket(socket: WebSocket, state: AppState, exec_id: String) {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // 2. 開始 Exec 並獲取流
+    let service = match get_docker_service(&state).await {
+        Ok(s) => s,
+        Err(_) => return, // Should catch earlier
+    };
+
+    let start_result = match service.start_exec(&exec_id).await {
+        Ok(res) => res,
+        Err(e) => {
+            let _ = ws_sender.send(Message::Text(format!("Failed to start exec: {}", e))).await;
+            return;
+        }
+    };
+
+    match start_result {
+        bollard::exec::StartExecResults::Attached { mut output, mut input } => {
+            // 3. 管道轉發
+
+            // Task 1: Docker Output -> WebSocket
+            let mut send_task = tokio::spawn(async move {
+                while let Some(msg) = output.next().await {
+                   match msg {
+                       Ok(log_output) => {
+                           // Bollard LogOutput contains actual bytes
+                           // We send them as binary or text. xterm.js handles text usually.
+                           // But LogOutput wraps stdout/stderr.
+                           let payload = log_output.into_bytes();
+                           // Use binary message for xterm.js
+                           // Or text if it expects string. strict check:
+                           // xterm with attach addon usually sends/receives raw strings or binary.
+                           // Let's try sending Text first as it's easier to debug, or Binary.
+                           // Generic binary is safer for raw sticky bits.
+                           // However, `into_bytes` returns `Bytes`.
+                           
+                           // Using Binary for xterm-addon-attach
+                           // if ws_sender.send(Message::Binary(payload.to_vec())).await.is_err() {
+                           //    break;
+                           // }
+                           
+                           // Converting to string lossy for safety if client expects text
+                           // But xterm-addon-attach defaults to binary?
+                           // Actually standard is usually text for simple shell.
+                           // Let's safe-bet on Binary?
+                           // Update: xterm.js attach addon handles both. Binary is safer for raw TTY.
+                           if ws_sender.send(Message::Binary(payload.to_vec())).await.is_err() {
+                               break;
+                           }
+                       }
+                       Err(_) => break,
+                   }
+                }
+            });
+
+            // Task 2: WebSocket -> Docker Input
+            let mut recv_task = tokio::spawn(async move {
+                while let Some(Ok(msg)) = ws_receiver.next().await {
+                    match msg {
+                        Message::Text(text) => {
+                            if input.write_all(text.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Binary(bin) => {
+                            if input.write_all(&bin).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Close(_) => break,
+                        _ => {}
+                    }
+                }
+            });
+
+            // Wait for either to finish
+            tokio::select! {
+                _ = (&mut send_task) => recv_task.abort(),
+                _ = (&mut recv_task) => send_task.abort(),
+            };
+        }
+        _ => {
+            let _ = ws_sender.send(Message::Text("Detached mode not supported".to_string())).await;
+        }
+    }
 }
 
 // ==================== 輔助函數 ====================

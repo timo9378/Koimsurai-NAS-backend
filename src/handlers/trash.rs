@@ -96,3 +96,34 @@ pub async fn empty_trash(
     }
     Ok(StatusCode::OK)
 }
+
+#[utoipa::path(
+    delete,
+    path = "/api/trash/{filename}",
+    params(
+        ("filename" = String, Path, description = "要永久刪除的檔案名 / Filename to permanently delete")
+    ),
+    responses(
+        (status = 200, description = "檔案已永久刪除 / File permanently deleted"),
+        (status = 404, description = "檔案不存在 / File not found")
+    )
+)]
+pub async fn permanent_delete(
+    State(state): State<AppState>,
+    Extension(_user_id): Extension<i64>,
+    AxumPath(filename): AxumPath<String>,
+) -> Result<StatusCode, AppError> {
+    let trash_path = state.storage_path.join(".trash").join(&filename);
+    
+    if !trash_path.exists() {
+        return Err(AppError::Status(StatusCode::NOT_FOUND));
+    }
+    
+    if trash_path.is_dir() {
+        fs::remove_dir_all(&trash_path).await.map_err(AppError::from)?;
+    } else {
+        fs::remove_file(&trash_path).await.map_err(AppError::from)?;
+    }
+    
+    Ok(StatusCode::OK)
+}

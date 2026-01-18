@@ -736,20 +736,14 @@ pub async fn delete_file(
         fs::create_dir_all(&trash_root).await.map_err(AppError::from)?;
     }
 
-    // Maintain directory structure in trash
-    let relative_path = full_path.strip_prefix(&state.storage_path).map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
-    let trash_path = trash_root.join(relative_path);
-    
-    if let Some(parent) = trash_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).await.map_err(AppError::from)?;
-        }
-    }
+    // Flatten trash structure: move directly to trash root
+    // Don't maintain directory structure as restore currently assumes flat structure
+    let file_name = full_path.file_name().unwrap_or_default().to_string_lossy();
+    let trash_path = trash_root.join(file_name.as_ref());
     
     // Handle collision by appending timestamp
     let final_trash_path = if trash_path.exists() {
         let timestamp = chrono::Utc::now().timestamp();
-        let file_name = trash_path.file_name().unwrap_or_default().to_string_lossy();
         trash_path.with_file_name(format!("{}.{}", file_name, timestamp))
     } else {
         trash_path
@@ -812,18 +806,13 @@ pub async fn batch_delete(
             fs::create_dir_all(&trash_root).await.map_err(AppError::from)?;
         }
 
-        let relative_path = full_path.strip_prefix(&state.storage_path).map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
-        let trash_path = trash_root.join(relative_path);
+        // Flatten trash structure: move directly to trash root
+        let file_name = full_path.file_name().unwrap_or_default().to_string_lossy();
+        let trash_path = trash_root.join(file_name.as_ref());
         
-        if let Some(parent) = trash_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).await.map_err(AppError::from)?;
-            }
-        }
-        
+        // Handle collision by appending timestamp
         let final_trash_path = if trash_path.exists() {
             let timestamp = chrono::Utc::now().timestamp();
-            let file_name = trash_path.file_name().unwrap_or_default().to_string_lossy();
             trash_path.with_file_name(format!("{}.{}", file_name, timestamp))
         } else {
             trash_path

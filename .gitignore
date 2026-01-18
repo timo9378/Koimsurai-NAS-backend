@@ -2,7 +2,7 @@
 *.db
 *.db-shm
 *.db-wal
-.env
+! .env
 
 # Storage 目錄中的使用者資料 (保留目錄結構但不追蹤內容)
 # User data in storage directory (keep structure but don't track contents)

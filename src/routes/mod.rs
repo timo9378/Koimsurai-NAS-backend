@@ -126,7 +126,7 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/media/hls/qualities", get(media::hls_qualities))
         // 其他
         .route("/trash", get(trash::list_trash))
-        .route("/trash/:filename", post(trash::restore_file))
+        .route("/trash/:filename", post(trash::restore_file).delete(trash::permanent_delete))
         .route("/trash", axum::routing::delete(trash::empty_trash))
         .route("/permissions", post(permission::set_permission))
         .route("/tasks", get(job::list_jobs))
@@ -149,10 +149,13 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/containers/:id/restart", post(docker::restart_container))
         .route("/containers/:id/logs", get(docker::container_logs))
         .route("/containers/:id/stats", get(docker::container_stats))
+        .route("/containers/:id/exec", get(docker::container_exec)) // WebSocket route
         // 鏡像操作
         .route("/images", get(docker::list_images))
         .route("/images/pull", post(docker::pull_image))
         .route("/images/:id", delete(docker::remove_image))
+        // 網絡操作
+        .route("/networks", get(docker::list_networks))
         .layer(middleware::from_fn(require_auth)); // Protect docker routes
 
 

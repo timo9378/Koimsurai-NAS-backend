@@ -3,6 +3,7 @@ use sysinfo::{System, Disks};
 use serde::Serialize;
 use crate::state::AppState;
 use crate::services::indexer::Indexer;
+use std::process::Command;
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct SystemStatus {
@@ -12,13 +13,57 @@ pub struct SystemStatus {
     total_swap: u64,
     used_swap: u64,
     disks: Vec<DiskInfo>,
+    gpu: Option<GpuInfo>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DiskInfo {
     name: String,
+    mount_point: String,
     total_space: u64,
     available_space: u64,
+    disk_type: String,
+}
+
+#[derive(Serialize, Clone, utoipa::ToSchema)]
+pub struct GpuInfo {
+    name: String,
+    memory_total: u64,
+    memory_used: u64,
+    memory_free: u64,
+    utilization: f32,
+    temperature: u32,
+}
+
+fn get_gpu_info() -> Option<GpuInfo> {
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu",
+            "--format=csv,noheader,nounits"
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.trim();
+    let parts: Vec<&str> = line.split(", ").collect();
+
+    if parts.len() >= 6 {
+        Some(GpuInfo {
+            name: parts[0].trim().to_string(),
+            memory_total: parts[1].trim().parse().unwrap_or(0) * 1024 * 1024, // MiB to bytes
+            memory_used: parts[2].trim().parse().unwrap_or(0) * 1024 * 1024,
+            memory_free: parts[3].trim().parse().unwrap_or(0) * 1024 * 1024,
+            utilization: parts[4].trim().parse().unwrap_or(0.0),
+            temperature: parts[5].trim().parse().unwrap_or(0),
+        })
+    } else {
+        None
+    }
 }
 
 #[utoipa::path(
@@ -39,11 +84,85 @@ pub async fn get_system_status() -> Json<SystemStatus> {
     let used_swap = sys.used_swap();
 
     let disks = Disks::new_with_refreshed_list();
-    let disk_info = disks.list().iter().map(|disk| DiskInfo {
-        name: disk.name().to_string_lossy().to_string(),
-        total_space: disk.total_space(),
-        available_space: disk.available_space(),
-    }).collect();
+    
+    // Filter out overlay, loop, tmpfs, Docker mounts, and virtual filesystems
+    // Only show real physical disks with actual mount points
+    let disk_info: Vec<DiskInfo> = disks.list().iter()
+        .filter(|disk| {
+            let mount = disk.mount_point().to_string_lossy();
+            let name = disk.name().to_string_lossy();
+            
+            // Skip loop devices
+            if name.starts_with("loop") {
+                return false;
+            }
+            
+            // Skip various virtual/system mounts
+            if mount.contains("/snap/") ||
+               mount.starts_with("/boot") ||
+               mount.starts_with("/run") ||
+               mount == "/dev/shm" {
+                return false;
+            }
+            
+            // Skip Docker-related mounts (overlay, container config files)
+            // These typically have overlay name or short config file mounts
+            if name == "overlay" || name.is_empty() {
+                return false;
+            }
+            
+            // Skip Docker container config files (resolv.conf, hostname, hosts, etc.)
+            let mount_str = mount.to_string();
+            if mount_str.contains("/docker/") ||
+               mount_str.ends_with("/resolv.conf") ||
+               mount_str.ends_with("/hostname") ||
+               mount_str.ends_with("/hosts") ||
+               mount_str.ends_with("/db") {
+                return false;
+            }
+            
+            // Skip NVIDIA driver mounts and system library directories
+            // These are bind-mounted by nvidia-container-toolkit
+            if mount_str.starts_with("/usr/") ||
+               mount_str.starts_with("/lib/") ||
+               mount_str.starts_with("/lib64/") ||
+               mount_str.contains("nvidia") ||
+               mount_str.contains("libnvidia") ||
+               mount_str.contains("gsp_") ||
+               name.contains("nvidia") ||
+               name.starts_with("libnvidia") ||
+               name.starts_with("gsp_") {
+                return false;
+            }
+            
+            // Only include if it's a real disk with substantial size (at least 1GB)
+            disk.total_space() > 1024 * 1024 * 1024
+        })
+        .map(|disk| {
+            let name = disk.name().to_string_lossy().to_string();
+            let mount = disk.mount_point().to_string_lossy().to_string();
+            
+            // Determine disk type based on name
+            let disk_type = if name.contains("nvme") {
+                "NVMe SSD".to_string()
+            } else if name.contains("sd") {
+                "HDD".to_string()
+            } else {
+                "Unknown".to_string()
+            };
+            
+            DiskInfo {
+                name,
+                mount_point: mount,
+                total_space: disk.total_space(),
+                available_space: disk.available_space(),
+                disk_type,
+            }
+        })
+        .collect();
+
+    // Get GPU info
+    let gpu = get_gpu_info();
 
     Json(SystemStatus {
         cpu_usage,
@@ -52,6 +171,7 @@ pub async fn get_system_status() -> Json<SystemStatus> {
         total_swap,
         used_swap,
         disks: disk_info,
+        gpu,
     })
 }
 

@@ -8,7 +8,9 @@ use bollard::query_parameters::{
     CreateImageOptionsBuilder, ListContainersOptionsBuilder, ListImagesOptionsBuilder,
     LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder,
     RestartContainerOptionsBuilder, StatsOptionsBuilder, StopContainerOptionsBuilder,
+    ListNetworksOptionsBuilder,
 };
+use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
 use bollard::Docker;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -154,6 +156,20 @@ pub struct ImageSummary {
 pub struct LogEntry {
     pub stream: String,
     pub message: String,
+}
+
+/// 網絡摘要資訊
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkSummary {
+    pub id: String,
+    pub name: String,
+    pub driver: String,
+    pub scope: String,
+    pub internal: bool,
+    pub attachable: bool,
+    pub ingress: bool,
+    pub ipam_driver: Option<String>,
+    pub containers: i32,
 }
 
 /// Docker 服務
@@ -543,6 +559,77 @@ impl DockerService {
 
         docker.remove_image(id, Some(options), None).await?;
         Ok(())
+    }
+
+    // ==================== 網絡操作 ====================
+
+    /// 列出所有網絡
+    pub async fn list_networks(&self) -> Result<Vec<NetworkSummary>, DockerError> {
+        let docker = self.get_docker().await?;
+
+        let options = ListNetworksOptionsBuilder::default().build();
+
+        let networks = docker.list_networks(Some(options)).await?;
+
+        let summaries = networks
+            .into_iter()
+            .map(|n| {
+                let container_count = n.containers
+                    .as_ref()
+                    .map(|c| c.len() as i32)
+                    .unwrap_or(0);
+                NetworkSummary {
+                    id: n.id.unwrap_or_default(),
+                    name: n.name.unwrap_or_default(),
+                    driver: n.driver.unwrap_or_default(),
+                    scope: n.scope.unwrap_or_default(),
+                    internal: n.internal.unwrap_or(false),
+                    attachable: n.attachable.unwrap_or(false),
+                    ingress: n.ingress.unwrap_or(false),
+                    ipam_driver: n.ipam.and_then(|i| i.driver),
+                    containers: container_count,
+                }
+            })
+            .collect();
+
+        Ok(summaries)
+    }
+
+    // ==================== Exec 操作 ====================
+
+    /// 創建 Exec 實例
+    pub async fn create_exec(
+        &self,
+        container_id: &str,
+        cmd: Vec<String>,
+    ) -> Result<String, DockerError> {
+        let docker = self.get_docker().await?;
+
+        let config = CreateExecOptions {
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            attach_stdin: Some(true),
+            tty: Some(true),
+            cmd: Some(cmd),
+            ..Default::default()
+        };
+
+        let result = docker.create_exec(container_id, config).await?;
+        Ok(result.id)
+    }
+
+    /// 開始 Exec 實例並獲取流
+    pub async fn start_exec(&self, exec_id: &str) -> Result<StartExecResults, DockerError> {
+        let docker = self.get_docker().await?;
+
+        let config = StartExecOptions {
+            detach: false,
+            tty: true,
+            ..Default::default()
+        };
+
+        let result = docker.start_exec(exec_id, Some(config)).await?;
+        Ok(result)
     }
 }
 
