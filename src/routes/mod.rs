@@ -174,7 +174,8 @@ pub async fn create_router(state: AppState) -> Router {
         .nest("/api/auth", auth_routes)
         .nest("/api", file_routes)
         .nest("/api/docker", docker_routes)
-        .route("/s/:id", get(share::access_share_link)) // Public share link
+        .route("/s/:id", get(share::access_share_link)) // Public share link - download
+        .route("/api/share/:id/info", get(share::get_share_info)) // Public share link - info
         .route("/webdav", any(webdav::webdav_handler))
         .route("/webdav/*path", any(webdav::webdav_handler))
         .layer(cors)

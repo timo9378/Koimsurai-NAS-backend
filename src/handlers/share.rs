@@ -1,23 +1,35 @@
 use axum::{
-    extract::{State, Path as AxumPath, Query},
+    extract::{State, Path as AxumPath, Query, Extension},
     http::StatusCode,
     Json,
     response::IntoResponse,
 };
-use tower_sessions::Session;
+use serde::Serialize;
 use crate::state::AppState;
 use crate::models::{CreateShareLinkRequest, ShareLinkResponse};
 use crate::error::AppError;
-use crate::handlers::auth::AUTH_SESSION_KEY;
 use crate::utils::hash::{hash_password, verify_password};
 use uuid::Uuid;
 use chrono::{Utc, Duration};
 use tower_http::services::ServeFile;
 use tower::util::ServiceExt;
+use std::path::Path;
 
 #[derive(serde::Deserialize, utoipa::IntoParams)]
 pub struct ShareQuery {
     pub pwd: Option<String>,
+}
+
+/// 分享連結元數據響應
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ShareInfoResponse {
+    pub id: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub mime_type: Option<String>,
+    pub is_password_protected: bool,
+    pub expires_at: Option<String>,
+    pub created_at: String,
 }
 
 #[utoipa::path(
@@ -30,11 +42,9 @@ pub struct ShareQuery {
 )]
 pub async fn create_share_link(
     State(state): State<AppState>,
-    session: Session,
+    Extension(user_id): Extension<i64>,
     Json(payload): Json<CreateShareLinkRequest>,
 ) -> Result<Json<ShareLinkResponse>, AppError> {
-    let user_id: i64 = session.get(AUTH_SESSION_KEY).await.map_err(AppError::from)?.ok_or(AppError::Status(StatusCode::UNAUTHORIZED))?;
-
     let id = Uuid::new_v4().to_string();
     let password_hash = if let Some(pwd) = payload.password {
         Some(hash_password(&pwd).map_err(AppError::from)?)
@@ -122,4 +132,71 @@ pub async fn access_share_link(
         Ok(response) => Ok(response.into_response()),
         Err(_) => Err(AppError::Status(StatusCode::INTERNAL_SERVER_ERROR)),
     }
+}
+/// 獲取分享連結的元數據（不需要認證，用於前端顯示）
+#[utoipa::path(
+    get,
+    path = "/api/share/{id}/info",
+    params(
+        ("id" = String, Path, description = "Share ID")
+    ),
+    responses(
+        (status = 200, description = "Share link info", body = ShareInfoResponse),
+        (status = 404, description = "Link not found"),
+        (status = 410, description = "Link expired")
+    )
+)]
+pub async fn get_share_info(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ShareInfoResponse>, AppError> {
+    // 查詢分享連結資訊
+    let row: Option<(String, Option<String>, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)> = sqlx::query_as(
+        "SELECT file_path, password_hash, expires_at, created_at FROM share_links WHERE id = ?"
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    let (file_path_str, password_hash, expires_at, created_at) = row.ok_or(AppError::Status(StatusCode::NOT_FOUND))?;
+
+    // 檢查是否過期
+    if let Some(expiry) = expires_at {
+        if Utc::now() > expiry {
+            return Err(AppError::Status(StatusCode::GONE)); // 410 Gone for expired links
+        }
+    }
+
+    // 獲取文件資訊
+    let full_path = state.storage_path.join(&file_path_str);
+    
+    if !full_path.exists() {
+        return Err(AppError::Status(StatusCode::NOT_FOUND));
+    }
+
+    // 獲取文件名和大小
+    let file_name = Path::new(&file_path_str)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    
+    let file_size = std::fs::metadata(&full_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    // 猜測 MIME 類型
+    let mime_type = mime_guess::from_path(&full_path)
+        .first()
+        .map(|m| m.to_string());
+
+    Ok(Json(ShareInfoResponse {
+        id,
+        file_name,
+        file_size,
+        mime_type,
+        is_password_protected: password_hash.is_some(),
+        expires_at: expires_at.map(|t| t.to_rfc3339()),
+        created_at: created_at.to_rfc3339(),
+    }))
 }
