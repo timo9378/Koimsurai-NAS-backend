@@ -3,7 +3,9 @@ use axum::{
     Router,
     middleware,
     extract::DefaultBodyLimit,
+    http::{Method, HeaderValue},
 };
+use tower_http::cors::{CorsLayer, Any};
 use tower_sessions::{SessionManagerLayer, Expiry};
 use tower_sessions_sqlx_store::SqliteStore;
 use utoipa::OpenApi;
@@ -160,6 +162,13 @@ pub async fn create_router(state: AppState) -> Router {
 
 
 
+    // Configure CORS for direct frontend-to-backend requests (e.g., file uploads)
+    // Note: allow_credentials cannot be used with allow_origin(Any)
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::OPTIONS])
+        .allow_headers(Any);
+
     Router::new()
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
         .nest("/api/auth", auth_routes)
@@ -168,6 +177,7 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/s/:id", get(share::access_share_link)) // Public share link
         .route("/webdav", any(webdav::webdav_handler))
         .route("/webdav/*path", any(webdav::webdav_handler))
+        .layer(cors)
         .layer(session_layer)
         .with_state(state)
 }

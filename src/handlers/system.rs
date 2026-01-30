@@ -1,5 +1,5 @@
 use axum::{Json, extract::State};
-use sysinfo::{System, Disks};
+use sysinfo::{System, Disks, Components};
 use serde::Serialize;
 use crate::state::AppState;
 use crate::services::indexer::Indexer;
@@ -8,6 +8,7 @@ use std::process::Command;
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct SystemStatus {
     cpu_usage: f32,
+    cpu_temp: Option<f32>,
     total_memory: u64,
     used_memory: u64,
     total_swap: u64,
@@ -64,6 +65,26 @@ fn get_gpu_info() -> Option<GpuInfo> {
     } else {
         None
     }
+}
+
+fn get_cpu_temperature() -> Option<f32> {
+    let components = Components::new_with_refreshed_list();
+    
+    // Look for CPU temperature sensors
+    // Common sensor names: "coretemp", "k10temp", "cpu_thermal", "Package", "Core"
+    for component in components.iter() {
+        let label = component.label().to_lowercase();
+        if label.contains("core") || label.contains("cpu") || 
+           label.contains("package") || label.contains("tctl") {
+            // temperature() returns Option<f32>
+            if let Some(temp) = component.temperature() {
+                return Some(temp);
+            }
+        }
+    }
+    
+    // Fallback: return first component temperature if available
+    components.iter().next().and_then(|c| c.temperature())
 }
 
 #[utoipa::path(
@@ -163,9 +184,13 @@ pub async fn get_system_status() -> Json<SystemStatus> {
 
     // Get GPU info
     let gpu = get_gpu_info();
+    
+    // Get CPU temperature
+    let cpu_temp = get_cpu_temperature();
 
     Json(SystemStatus {
         cpu_usage,
+        cpu_temp,
         total_memory,
         used_memory,
         total_swap,
