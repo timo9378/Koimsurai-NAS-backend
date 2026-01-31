@@ -70,3 +70,51 @@ pub async fn list_audit_logs(
 
     Ok(Json(logs))
 }
+
+#[utoipa::path(
+    delete,
+    path = "/api/audit/logs/{id}",
+    params(
+        ("id" = i64, Path, description = "Audit log ID to delete")
+    ),
+    responses(
+        (status = 204, description = "Audit log deleted successfully"),
+        (status = 404, description = "Audit log not found")
+    )
+)]
+pub async fn delete_audit_log(
+    State(state): State<AppState>,
+    Extension(_user_id): Extension<i64>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let result = sqlx::query("DELETE FROM audit_logs WHERE id = ?")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::from)?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::Status(axum::http::StatusCode::NOT_FOUND));
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/audit/logs",
+    responses(
+        (status = 204, description = "All audit logs deleted successfully")
+    )
+)]
+pub async fn clear_audit_logs(
+    State(state): State<AppState>,
+    Extension(_user_id): Extension<i64>,
+) -> Result<axum::http::StatusCode, AppError> {
+    sqlx::query("DELETE FROM audit_logs")
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::from)?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}

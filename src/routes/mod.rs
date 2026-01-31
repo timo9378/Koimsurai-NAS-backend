@@ -61,6 +61,8 @@ use crate::handlers::media::TimelineGroup;
         tag::list_tags,
         tag::list_files_by_tag,
         audit::list_audit_logs,
+        audit::delete_audit_log,
+        audit::clear_audit_logs,
         version::list_file_versions,
         version::restore_version,
         search::search_files,
@@ -140,7 +142,8 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/permissions", post(permission::set_permission))
         .route("/tasks", get(job::list_jobs))
         .route("/ws", get(ws::ws_handler))
-        .route("/audit/logs", get(audit::list_audit_logs))
+        .route("/audit/logs", get(audit::list_audit_logs).delete(audit::clear_audit_logs))
+        .route("/audit/logs/:id", axum::routing::delete(audit::delete_audit_log))
         .route("/search", get(search::search_files))
         .layer(middleware::from_fn(require_auth)) // Protect file routes
         // 設置上傳大小限制為 10GB
