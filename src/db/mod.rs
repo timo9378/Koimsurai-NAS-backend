@@ -291,6 +291,26 @@ pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // 建立上傳連結表格 (反向分享 - 讓其他人上傳檔案用)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS upload_links (
+            id TEXT PRIMARY KEY,
+            target_path TEXT NOT NULL,
+            password_hash TEXT,
+            expires_at DATETIME,
+            max_files INTEGER,
+            max_file_size INTEGER,
+            uploaded_count INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            creator_id INTEGER,
+            FOREIGN KEY(creator_id) REFERENCES users(id)
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
     println!("Database initialized successfully");
     Ok(pool)
 }

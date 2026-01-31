@@ -11,7 +11,7 @@ use tower_sessions_sqlx_store::SqliteStore;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use crate::state::AppState;
-use crate::handlers::{auth, file, share, system, webdav, media, trash, permission, ws, job, upload, tag, audit, version, search, docker};
+use crate::handlers::{auth, file, share, system, webdav, media, trash, permission, ws, job, upload, upload_link, tag, audit, version, search, docker};
 use crate::middleware::auth::require_auth;
 
 
@@ -58,6 +58,8 @@ use crate::handlers::media::TimelineGroup;
         tag::add_tag,
         tag::remove_tag,
         tag::toggle_star,
+        tag::list_tags,
+        tag::list_files_by_tag,
         audit::list_audit_logs,
         version::list_file_versions,
         version::restore_version,
@@ -66,7 +68,7 @@ use crate::handlers::media::TimelineGroup;
         media::get_timeline
     ),
     components(
-        schemas(RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo, crate::handlers::file::CreateFolderRequest)
+        schemas(RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo, crate::handlers::file::CreateFolderRequest, crate::handlers::tag::UserTag, crate::handlers::tag::TaggedFile)
     ),
     tags(
         (name = "auth", description = "Authentication endpoints"),
@@ -74,7 +76,8 @@ use crate::handlers::media::TimelineGroup;
         (name = "share", description = "Share link endpoints"),
         (name = "system", description = "System monitoring endpoints"),
         (name = "audit", description = "Audit log endpoints"),
-        (name = "search", description = "Search endpoints")
+        (name = "search", description = "Search endpoints"),
+        (name = "tags", description = "Tag management endpoints")
     )
 )]
 struct ApiDoc;
@@ -107,6 +110,9 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/upload/*path", post(file::upload_file))
         .route("/download/*path", get(file::download_file))
         .route("/thumbnail/:size/*path", get(file::get_thumbnail))
+        // Tags
+        .route("/tags", get(tag::list_tags))
+        .route("/tags/:tag_name/files", get(tag::list_files_by_tag))
         .route("/tags/add/*path", post(tag::add_tag))
         .route("/tags/remove/:tag_name/*path", axum::routing::delete(tag::remove_tag))
         .route("/star/file/*path", post(tag::toggle_star))
@@ -115,6 +121,7 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/files/*path", get(file::list_files).delete(file::delete_file).put(file::rename_file))
 
         .route("/share", post(share::create_share_link))
+        .route("/upload-link", post(upload_link::create_upload_link))
         .route("/system/status", get(system::get_system_status))
         // 系統管理端點 (適合在 DB 還原後執行)
         .route("/system/verify-consistency", post(system::verify_consistency))
@@ -174,8 +181,10 @@ pub async fn create_router(state: AppState) -> Router {
         .nest("/api/auth", auth_routes)
         .nest("/api", file_routes)
         .nest("/api/docker", docker_routes)
-        .route("/s/:id", get(share::access_share_link)) // Public share link - download
+        .route("/api/share/:id/download", get(share::access_share_link)) // Public share link - download
         .route("/api/share/:id/info", get(share::get_share_info)) // Public share link - info
+        .route("/api/upload-link/:id/upload", post(upload_link::upload_via_link)) // Public upload link - upload
+        .route("/api/upload-link/:id/info", get(upload_link::get_upload_link_info)) // Public upload link - info
         .route("/webdav", any(webdav::webdav_handler))
         .route("/webdav/*path", any(webdav::webdav_handler))
         .layer(cors)

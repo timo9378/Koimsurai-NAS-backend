@@ -11,6 +11,7 @@ pub mod system;
 pub mod tag;
 pub mod trash;
 pub mod upload;
+pub mod upload_link;
 pub mod version;
 pub mod webdav;
 pub mod ws;
