@@ -670,6 +670,11 @@ pub async fn get_thumbnail(
     // Validate path first
     let full_path = validate_path(&state.storage_path, &path)?;
     
+    // Check if the original file exists
+    if !full_path.exists() {
+        return Err(AppError::Status(StatusCode::NOT_FOUND));
+    }
+    
     // Construct thumbnail path
     // storage/.thumbnails/path/to/file.jpg.small.jpg
     
@@ -682,7 +687,24 @@ pub async fn get_thumbnail(
     let thumb_path = thumb_dir.join(thumb_name);
 
     if !thumb_path.exists() {
-        return Err(AppError::Status(StatusCode::NOT_FOUND));
+        // Thumbnail doesn't exist - enqueue generation job and serve original file
+        // This ensures the thumbnail will be available on future requests
+        let thumb_job = crate::utils::queue::JobType::GenerateThumbnail {
+            input_path: full_path.clone(),
+            output_path: thumb_path.clone(),
+        };
+        if let Err(e) = state.queue.enqueue(thumb_job).await {
+            tracing::warn!("Failed to enqueue thumbnail job for {:?}: {}", full_path, e);
+        }
+        
+        // Serve original file instead of returning 404
+        let service = ServeFile::new(&full_path);
+        let result = service.oneshot(req).await;
+        
+        return match result {
+            Ok(response) => Ok(response.into_response()),
+            Err(_) => Err(AppError::Status(StatusCode::INTERNAL_SERVER_ERROR)),
+        };
     }
 
     let service = ServeFile::new(thumb_path);
