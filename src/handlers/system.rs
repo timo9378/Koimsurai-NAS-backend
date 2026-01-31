@@ -15,6 +15,16 @@ pub struct SystemStatus {
     used_swap: u64,
     disks: Vec<DiskInfo>,
     gpu: Option<GpuInfo>,
+    top_processes: Vec<ProcessInfo>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ProcessInfo {
+    pid: u32,
+    name: String,
+    cpu_usage: f32,
+    memory_bytes: u64,
+    memory_percent: f32,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -85,6 +95,62 @@ fn get_cpu_temperature() -> Option<f32> {
     
     // Fallback: return first component temperature if available
     components.iter().next().and_then(|c| c.temperature())
+}
+
+/// Get top processes from host using `ps` command
+/// This works because we have access to the host's /proc via Docker
+fn get_top_processes(total_memory: u64) -> Vec<ProcessInfo> {
+    // Use ps to get top CPU consuming processes
+    // Format: pid, %cpu, rss (in KB), command
+    let output = Command::new("ps")
+        .args([
+            "-eo", "pid,%cpu,rss,comm",
+            "--sort=-%cpu",
+            "--no-headers"
+        ])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut processes: Vec<ProcessInfo> = stdout
+        .lines()
+        .take(20) // Get top 20
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let pid: u32 = parts[0].parse().ok()?;
+                let cpu_usage: f32 = parts[1].parse().ok()?;
+                let rss_kb: u64 = parts[2].parse().ok()?;
+                let memory_bytes = rss_kb * 1024;
+                let memory_percent = if total_memory > 0 {
+                    (memory_bytes as f32 / total_memory as f32) * 100.0
+                } else {
+                    0.0
+                };
+                // Command is everything after the 3rd field
+                let name = parts[3..].join(" ");
+                
+                Some(ProcessInfo {
+                    pid,
+                    name,
+                    cpu_usage,
+                    memory_bytes,
+                    memory_percent,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Filter out noise (very low usage processes that aren't interesting)
+    processes.retain(|p| p.cpu_usage >= 0.1 || p.memory_bytes > 50 * 1024 * 1024);
+    processes.truncate(15);
+    processes
 }
 
 #[utoipa::path(
@@ -188,6 +254,9 @@ pub async fn get_system_status() -> Json<SystemStatus> {
     // Get CPU temperature
     let cpu_temp = get_cpu_temperature();
 
+    // Get top processes using ps command (works in container)
+    let top_processes = get_top_processes(total_memory);
+
     Json(SystemStatus {
         cpu_usage,
         cpu_temp,
@@ -197,6 +266,7 @@ pub async fn get_system_status() -> Json<SystemStatus> {
         used_swap,
         disks: disk_info,
         gpu,
+        top_processes,
     })
 }
 

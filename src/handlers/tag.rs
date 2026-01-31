@@ -26,8 +26,8 @@ pub struct UserTag {
 pub struct TaggedFile {
     pub path: String,
     pub name: String,
-    pub is_dir: bool,
-}
+    pub is_dir: bool,    pub size: u64,
+    pub modified: String,}
 
 #[utoipa::path(
     post,
@@ -198,16 +198,27 @@ pub async fn list_files_by_tag(
 
     let tagged_files: Vec<TaggedFile> = files
         .into_iter()
-        .map(|(path,)| {
+        .filter_map(|(path,)| {
             let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            // Check if file exists and is a directory
-            let full_path = std::path::Path::new("/app/data").join(path.trim_start_matches('/'));
-            let is_dir = full_path.is_dir();
-            TaggedFile {
+            // Check if file exists and get metadata using the correct storage path
+            let full_path = state.storage_path.join(path.trim_start_matches('/'));
+            let metadata = full_path.metadata().ok()?;
+            let is_dir = metadata.is_dir();
+            let size = if is_dir { 0 } else { metadata.len() };
+            let modified = metadata.modified().ok()
+                .map(|t| {
+                    let datetime: chrono::DateTime<chrono::Utc> = t.into();
+                    datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+                })
+                .unwrap_or_default();
+            
+            Some(TaggedFile {
                 path: path.clone(),
                 name,
                 is_dir,
-            }
+                size,
+                modified,
+            })
         })
         .collect();
 

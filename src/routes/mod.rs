@@ -11,7 +11,7 @@ use tower_sessions_sqlx_store::SqliteStore;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use crate::state::AppState;
-use crate::handlers::{auth, file, share, system, webdav, media, trash, permission, ws, job, upload, upload_link, tag, audit, version, search, docker};
+use crate::handlers::{auth, file, share, system, webdav, media, trash, permission, ws, job, upload, upload_link, tag, audit, version, search, docker, terminal};
 use crate::middleware::auth::require_auth;
 
 
@@ -141,10 +141,12 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/trash", axum::routing::delete(trash::empty_trash))
         .route("/permissions", post(permission::set_permission))
         .route("/tasks", get(job::list_jobs))
+        .route("/terminal", get(terminal::terminal_handler))
         .route("/ws", get(ws::ws_handler))
         .route("/audit/logs", get(audit::list_audit_logs).delete(audit::clear_audit_logs))
         .route("/audit/logs/:id", axum::routing::delete(audit::delete_audit_log))
         .route("/search", get(search::search_files))
+        .route("/search/ai-tags", get(search::search_ai_tags))
         .layer(middleware::from_fn(require_auth)) // Protect file routes
         // 設置上傳大小限制為 10GB
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10GB

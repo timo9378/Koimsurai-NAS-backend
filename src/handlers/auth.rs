@@ -140,26 +140,39 @@ pub async fn login(
     .await
     .map_err(AppError::from)?;
 
-    // 設定 HttpOnly Cookie
-    let cookie = Cookie::build((REFRESH_TOKEN_COOKIE_NAME, refresh_token))
-        .http_only(true)
-        .path("/")
-        .same_site(SameSite::Strict)
-        .secure(true) // 在生產環境應設為 true
-        .max_age(time::Duration::days(7))
-        .build();
-
     // Determine cookie `secure` flag from environment (default true).
     let cookie_secure = std::env::var("COOKIE_SECURE").unwrap_or_else(|_| "true".to_string()) == "true";
+    
+    // Get cookie domain from environment for cross-subdomain sharing
+    // Set to ".koimsurai.com" in production to share between nas. and nas-api.
+    let cookie_domain = std::env::var("COOKIE_DOMAIN").ok();
+
+    // 設定 HttpOnly Cookie for refresh token
+    let mut refresh_cookie_builder = Cookie::build((REFRESH_TOKEN_COOKIE_NAME, refresh_token))
+        .http_only(true)
+        .path("/")
+        .same_site(SameSite::Lax)  // Changed from Strict to Lax for cross-subdomain
+        .max_age(time::Duration::days(7));
+    
+    if cookie_secure {
+        refresh_cookie_builder = refresh_cookie_builder.secure(true);
+    }
+    if let Some(ref domain) = cookie_domain {
+        refresh_cookie_builder = refresh_cookie_builder.domain(domain.clone());
+    }
+    let cookie = refresh_cookie_builder.build();
 
     // Also set access_token as HttpOnly cookie for cookie-based auth
     let mut access_cookie_builder = Cookie::build((ACCESS_TOKEN_COOKIE_NAME, access_token.clone()))
         .http_only(true)
         .path("/")
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)  // Changed from Strict to Lax for cross-subdomain
         .max_age(time::Duration::minutes(15));
     if cookie_secure {
         access_cookie_builder = access_cookie_builder.secure(true);
+    }
+    if let Some(ref domain) = cookie_domain {
+        access_cookie_builder = access_cookie_builder.domain(domain.clone());
     }
     let access_cookie = access_cookie_builder.build();
 
@@ -228,23 +241,34 @@ pub async fn refresh(
     .await
     .map_err(AppError::from)?;
 
+    // Determine cookie settings from environment
+    let cookie_secure = std::env::var("COOKIE_SECURE").unwrap_or_else(|_| "true".to_string()) == "true";
+    let cookie_domain = std::env::var("COOKIE_DOMAIN").ok();
+
     // 更新 Cookie
-    let cookie = Cookie::build((REFRESH_TOKEN_COOKIE_NAME, new_refresh_token))
+    let mut refresh_cookie_builder = Cookie::build((REFRESH_TOKEN_COOKIE_NAME, new_refresh_token))
         .http_only(true)
         .path("/")
-        .same_site(SameSite::Strict)
-        .max_age(time::Duration::days(7))
-        .build();
+        .same_site(SameSite::Lax)
+        .max_age(time::Duration::days(7));
+    if cookie_secure {
+        refresh_cookie_builder = refresh_cookie_builder.secure(true);
+    }
+    if let Some(ref domain) = cookie_domain {
+        refresh_cookie_builder = refresh_cookie_builder.domain(domain.clone());
+    }
+    let cookie = refresh_cookie_builder.build();
 
-    // Determine cookie `secure` flag from environment (default true).
-    let cookie_secure = std::env::var("COOKIE_SECURE").unwrap_or_else(|_| "true".to_string()) == "true";
     let mut access_cookie_builder = Cookie::build((ACCESS_TOKEN_COOKIE_NAME, access_token.clone()))
         .http_only(true)
         .path("/")
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::minutes(15));
     if cookie_secure {
         access_cookie_builder = access_cookie_builder.secure(true);
+    }
+    if let Some(ref domain) = cookie_domain {
+        access_cookie_builder = access_cookie_builder.domain(domain.clone());
     }
     let access_cookie = access_cookie_builder.build();
 

@@ -9,6 +9,7 @@ pub mod search;
 pub mod share;
 pub mod system;
 pub mod tag;
+pub mod terminal;
 pub mod trash;
 pub mod upload;
 pub mod upload_link;

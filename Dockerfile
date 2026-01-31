@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     ffmpeg \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
