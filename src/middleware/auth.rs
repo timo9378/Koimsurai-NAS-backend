@@ -68,9 +68,11 @@ pub async fn require_auth(
                     }
                 }
             } else if referer.is_none() {
-                // 既沒有 Origin 也沒有 Referer — 可疑的跨站請求
-                // 但為了相容性（某些合法客戶端可能不帶這些 header），僅記錄警告
-                tracing::debug!("Cookie-based mutating request without Origin or Referer header");
+                // 既沒有 Origin 也沒有 Referer — 預設拒絕（CSRF 防護）
+                // Cookie 搭配 SameSite=Lax 已阻擋大部分跨站 POST，
+                // 但缺少 Origin/Referer 的 mutating 請求仍應視為可疑。
+                tracing::warn!("CSRF blocked: Cookie-based mutating request without Origin or Referer header");
+                return Err(StatusCode::FORBIDDEN);
             }
         }
     }

@@ -672,7 +672,7 @@ async fn execute_external_command(cmd: &str, current_dir: &str, storage_base: &s
                     // 驗證路徑在 storage 內
                     if let Ok(canonical) = std::fs::canonicalize(std::path::Path::new(&target_path).parent().unwrap_or(std::path::Path::new(current_dir))) {
                         if canonical.to_string_lossy().starts_with(storage_base) {
-                            if let Err(e) = std::fs::write(&target_path, stdout.as_bytes()) {
+                            if let Err(e) = tokio::fs::write(&target_path, stdout.as_bytes()).await {
                                 return format!("\x1b[31m寫入錯誤: {}\x1b[0m", e);
                             }
                             if !stderr.is_empty() {
@@ -698,49 +698,60 @@ async fn execute_external_command(cmd: &str, current_dir: &str, storage_base: &s
     }
 }
 
-/// 安全地執行管道命令（每一段都直接執行，不透過 shell）
-/// 使用中間 Vec<u8> 傳遞管道資料，避免跨進程 fd 問題
-/// Safely execute piped commands - each segment runs directly without shell
+/// 安全地執行管道命令 — 使用 OS 層級 Pipe 串流，不將整個 stdout 載入記憶體
+/// 每個子行程的 stdout 直接接到下一個子行程的 stdin（透過 tokio::io::copy 串流），
+/// 固定 buffer size，避免 OOM 和死鎖（如 `yes | head -n 5`）。
 async fn execute_pipeline(cmd: &str, current_dir: &str, storage_base: &str) -> String {
     use tokio::process::Command;
     use std::process::Stdio;
-    use tokio::io::AsyncWriteExt;
 
     let segments: Vec<&str> = cmd.split('|').collect();
-    
+
     if segments.is_empty() {
         return String::new();
     }
 
-    // 執行第一個命令取得輸出
+    // 啟動第一個命令
     let first_parts: Vec<&str> = segments[0].trim().split_whitespace().collect();
     if first_parts.is_empty() {
         return String::new();
     }
 
-    let first_output = match Command::new(first_parts[0])
+    let mut prev_child = match Command::new(first_parts[0])
         .args(&first_parts[1..])
         .current_dir(current_dir)
         .env("HOME", storage_base)
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("TERM", "xterm-256color")
-        .output()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     {
-        Ok(o) => o,
+        Ok(c) => c,
         Err(e) => return format!("\x1b[31m執行錯誤 ({}): {}\x1b[0m", first_parts[0], e),
     };
 
-    let mut current_stdout = first_output.stdout;
+    // 收集所有中間子行程以便等待它們完成
+    let mut children: Vec<(String, tokio::process::Child)> = Vec::new();
 
-    // 依序執行管道中的每個後續命令，將前一個的 stdout 作為 stdin
+    // 依序啟動後續命令，以 tokio::io::copy 串流連接
     for segment in &segments[1..] {
         let parts: Vec<&str> = segment.trim().split_whitespace().collect();
         if parts.is_empty() {
             continue;
         }
 
-        let mut child = match Command::new(parts[0])
+        // 取得前一個行程的 stdout
+        let prev_stdout = match prev_child.stdout.take() {
+            Some(out) => out,
+            None => {
+                // 前一個行程沒有 stdout，等待它結束
+                children.push((first_parts[0].to_string(), prev_child));
+                return "\x1b[31m管道錯誤: 無法取得前一個命令的輸出\x1b[0m".to_string();
+            }
+        };
+
+        let mut next_child = match Command::new(parts[0])
             .args(&parts[1..])
             .current_dir(current_dir)
             .env("HOME", storage_base)
@@ -752,38 +763,61 @@ async fn execute_pipeline(cmd: &str, current_dir: &str, storage_base: &str) -> S
             .spawn()
         {
             Ok(c) => c,
-            Err(e) => return format!("\x1b[31m執行錯誤 ({}): {}\x1b[0m", parts[0], e),
+            Err(e) => {
+                let _ = prev_child.kill().await;
+                return format!("\x1b[31m執行錯誤 ({}): {}\x1b[0m", parts[0], e);
+            }
         };
 
-        // 寫入前一個命令的 stdout 到當前命令的 stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            let data = current_stdout.clone();
-            tokio::spawn(async move {
-                let _ = stdin.write_all(&data).await;
-                drop(stdin); // 關閉 stdin 讓命令知道輸入結束
-            });
-        }
-
-        match child.wait_with_output().await {
-            Ok(output) => {
-                current_stdout = output.stdout;
-                // 如果有 stderr 且非空，附加到最終輸出
-                if !output.stderr.is_empty() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if !stderr.trim().is_empty() {
-                        // stderr 不阻塞管道，但最後會顯示
-                        tracing::debug!("Pipeline stderr from {}: {}", parts[0], stderr);
-                    }
-                }
+        // 取得下一個行程的 stdin，用 tokio::io::copy 串流（固定 buffer，不會 OOM）
+        let next_stdin = next_child.stdin.take();
+        tokio::spawn(async move {
+            if let Some(mut stdin) = next_stdin {
+                let mut stdout_reader = prev_stdout;
+                // tokio::io::copy 使用固定大小 buffer 串流，不會將整個輸出載入記憶體
+                let _ = tokio::io::copy(&mut stdout_reader, &mut stdin).await;
+                // drop stdin 讓下游行程收到 EOF
             }
-            Err(e) => return format!("\x1b[31m執行錯誤 ({}): {}\x1b[0m", parts[0], e),
-        }
+        });
+
+        // 將前一個 child 存起來等待
+        children.push((first_parts[0].to_string(), prev_child));
+        prev_child = next_child;
     }
 
-    let stdout = String::from_utf8_lossy(&current_stdout);
-    let mut result = String::new();
-    if !stdout.is_empty() {
-        result.push_str(&stdout.replace('\n', "\r\n"));
+    // 等待最後一個行程的輸出（有 stdout 上限保護）
+    const MAX_OUTPUT_SIZE: usize = 10 * 1024 * 1024; // 10 MB 上限
+    match prev_child.wait_with_output().await {
+        Ok(output) => {
+            // 等待所有中間行程結束（它們的 stdout 已被消費）
+            for (_, mut child) in children {
+                let _ = child.wait().await;
+            }
+
+            let stdout = if output.stdout.len() > MAX_OUTPUT_SIZE {
+                let truncated = String::from_utf8_lossy(&output.stdout[..MAX_OUTPUT_SIZE]);
+                format!("{}\r\n\x1b[33m[輸出過長，已截斷至 10MB]\x1b[0m", truncated.replace('\n', "\r\n"))
+            } else {
+                String::from_utf8_lossy(&output.stdout).replace('\n', "\r\n")
+            };
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            let mut result = String::new();
+            if !stdout.is_empty() {
+                result.push_str(&stdout);
+            }
+            if !stderr.trim().is_empty() {
+                result.push_str(&format!("\x1b[31m{}\x1b[0m", stderr.replace('\n', "\r\n")));
+            }
+            result.trim_end().to_string()
+        }
+        Err(e) => {
+            // 清理所有子行程
+            for (_, mut child) in children {
+                let _ = child.kill().await;
+            }
+            format!("\x1b[31m執行錯誤: {}\x1b[0m", e)
+        }
     }
-    result.trim_end().to_string()
 }
