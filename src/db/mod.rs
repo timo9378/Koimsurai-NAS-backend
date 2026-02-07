@@ -311,6 +311,23 @@ pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // 建立垃圾桶 metadata 表格 (記錄原始路徑，以便還原到正確位置)
+    // Create trash_metadata table (record original path for correct restore)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS trash_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trash_name TEXT NOT NULL UNIQUE,
+            original_path TEXT NOT NULL,
+            deleted_by INTEGER,
+            deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(deleted_by) REFERENCES users(id)
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
     println!("Database initialized successfully");
     Ok(pool)
 }

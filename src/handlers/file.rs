@@ -316,12 +316,24 @@ pub async fn list_files(
     let normalized_path = path.trim_end_matches('/').replace('\\', "/");
     let parent_path = if normalized_path.is_empty() { "".to_string() } else { normalized_path };
 
-    let mut sql = String::from("SELECT name, is_dir, size, modified, mime_type FROM files WHERE ");
+    let mut sql = String::from("SELECT name, is_dir, size, modified, mime_type, parent_path FROM files WHERE ");
     let mut params = Vec::new();
 
+    let is_search = query.search.is_some();
+
     if let Some(search) = &query.search {
-        sql.push_str("name LIKE ?");
-        params.push(format!("%{}%", search));
+        // Search within current directory and its subdirectories
+        if parent_path.is_empty() {
+            // Root directory: search all files
+            sql.push_str("name LIKE ?");
+            params.push(format!("%{}%", search));
+        } else {
+            // Specific directory: search within this directory tree
+            sql.push_str("(parent_path = ? OR parent_path LIKE ?) AND name LIKE ?");
+            params.push(parent_path.clone());
+            params.push(format!("{}/%", parent_path));
+            params.push(format!("%{}%", search));
+        }
     } else {
         sql.push_str("parent_path = ?");
         params.push(parent_path.clone());
@@ -347,7 +359,7 @@ pub async fn list_files(
     
     sql.push_str(" LIMIT ? OFFSET ?");
 
-    let mut query_builder = sqlx::query_as::<_, (String, bool, i64, chrono::NaiveDateTime, Option<String>)>(&sql);
+    let mut query_builder = sqlx::query_as::<_, (String, bool, i64, chrono::NaiveDateTime, Option<String>, Option<String>)>(&sql);
     
     for param in params {
         query_builder = query_builder.bind(param);
@@ -359,16 +371,23 @@ pub async fn list_files(
     let mut files = Vec::new();
     let mut stale_paths: Vec<String> = Vec::new();
     
-    for (name, is_dir, size, modified, mime_type) in rows {
+    for (name, is_dir, size, modified, mime_type, row_parent_path) in rows {
+        // For search results, use the actual parent_path from DB; otherwise use the requested parent_path
+        let effective_parent = if is_search {
+            row_parent_path.as_deref().unwrap_or("").to_string()
+        } else {
+            parent_path.clone()
+        };
+
         // 驗證檔案是否真的存在
         // Verify the file actually exists on disk
-        let file_path = state.storage_path.join(&parent_path).join(&name);
+        let file_path = state.storage_path.join(&effective_parent).join(&name);
         if !file_path.exists() {
             // 記錄不存在的檔案，稍後清理
-            let db_path = if parent_path.is_empty() {
+            let db_path = if effective_parent.is_empty() {
                 name.clone()
             } else {
-                format!("{}/{}", parent_path, name)
+                format!("{}/{}", effective_parent, name)
             };
             stale_paths.push(db_path);
             continue; // 跳過這個檔案
@@ -385,10 +404,10 @@ pub async fn list_files(
         };
 
         // Query tags
-        let file_db_path = if parent_path.is_empty() {
+        let file_db_path = if effective_parent.is_empty() {
             name.clone()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{}/{}", effective_parent, name)
         };
 
         let tags = sqlx::query_as::<_, (String, Option<String>)>(
@@ -764,18 +783,29 @@ pub async fn delete_file(
     let trash_path = trash_root.join(file_name.as_ref());
     
     // Handle collision by appending timestamp
-    let final_trash_path = if trash_path.exists() {
+    let (final_trash_path, trash_name) = if trash_path.exists() {
         let timestamp = chrono::Utc::now().timestamp();
-        trash_path.with_file_name(format!("{}.{}", file_name, timestamp))
+        let new_name = format!("{}.{}", file_name, timestamp);
+        (trash_root.join(&new_name), new_name)
     } else {
-        trash_path
+        (trash_path, file_name.to_string())
     };
 
-    fs::rename(full_path, final_trash_path).await.map_err(AppError::from)?;
+    fs::rename(full_path, &final_trash_path).await.map_err(AppError::from)?;
+
+    // Record original path in trash_metadata for correct restore
+    let normalized_path = path.replace('\\', "/");
+    let _ = sqlx::query(
+        "INSERT OR REPLACE INTO trash_metadata (trash_name, original_path, deleted_by) VALUES (?, ?, ?)"
+    )
+    .bind(&trash_name)
+    .bind(&normalized_path)
+    .bind(user_id)
+    .execute(&state.pool)
+    .await;
 
     // === 從 files 資料表移除記錄 ===
     // Remove from files table
-    let normalized_path = path.replace('\\', "/");
     sqlx::query("DELETE FROM files WHERE path = ? OR path LIKE ?")
         .bind(&normalized_path)
         .bind(format!("{}/%", normalized_path)) // 如果是目錄，一併刪除子項目
@@ -833,16 +863,29 @@ pub async fn batch_delete(
         let trash_path = trash_root.join(file_name.as_ref());
         
         // Handle collision by appending timestamp
-        let final_trash_path = if trash_path.exists() {
+        let (final_trash_path, trash_name) = if trash_path.exists() {
             let timestamp = chrono::Utc::now().timestamp();
-            trash_path.with_file_name(format!("{}.{}", file_name, timestamp))
+            let new_name = format!("{}.{}", file_name, timestamp);
+            (trash_root.join(&new_name), new_name)
         } else {
-            trash_path
+            (trash_path, file_name.to_string())
         };
 
-        if let Err(e) = fs::rename(full_path, final_trash_path).await {
+        if let Err(e) = fs::rename(&full_path, &final_trash_path).await {
             tracing::error!("Failed to move file to trash: {}", e);
+            continue;
         }
+
+        // Record original path in trash_metadata
+        let normalized_path = path.replace('\\', "/");
+        let _ = sqlx::query(
+            "INSERT OR REPLACE INTO trash_metadata (trash_name, original_path, deleted_by) VALUES (?, ?, ?)"
+        )
+        .bind(&trash_name)
+        .bind(&normalized_path)
+        .bind(0i64) // batch_delete doesn't have user_id Extension yet
+        .execute(&state.pool)
+        .await;
     }
 
     Ok(StatusCode::OK)
