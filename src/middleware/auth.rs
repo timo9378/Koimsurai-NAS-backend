@@ -1,45 +1,84 @@
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{StatusCode, header},
     middleware::Next,
     response::Response,
 };
-use crate::utils::jwt::verify_token;
+use axum_extra::extract::CookieJar;
+use crate::state::AppState;
+use crate::utils::jwt::verify_token_with_secret;
 
 pub async fn require_auth(
+    State(state): State<AppState>,
+    jar: CookieJar,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // First try Authorization header
+    // First try Authorization header (explicit token, immune to CSRF)
     let auth_header = request.headers().get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
 
-    // Extract token either from Bearer header or from access_token cookie
     let mut token_opt: Option<String> = None;
+    let is_bearer_auth;
 
     if let Some(h) = auth_header {
-        if h.starts_with("Bearer ") {
-            token_opt = Some(h[7..].to_string());
+        if let Some(bearer) = h.strip_prefix("Bearer ") {
+            token_opt = Some(bearer.to_string());
+        }
+    }
+    is_bearer_auth = token_opt.is_some();
+
+    // Fallback to Cookie (using axum-extra CookieJar for correct parsing)
+    if token_opt.is_none() {
+        if let Some(cookie) = jar.get("access_token") {
+            token_opt = Some(cookie.value().to_string());
         }
     }
 
-    if token_opt.is_none() {
-        // Try cookie header (simple parse without extra crate)
-        if let Some(cookie_header) = request.headers().get(header::COOKIE).and_then(|h| h.to_str().ok()) {
-            for part in cookie_header.split(';').map(|s| s.trim()) {
-                if let Some(rest) = part.strip_prefix("access_token=") {
-                    // cookie value may be quoted; trim quotes
-                    let val = rest.trim_matches('"').to_string();
-                    token_opt = Some(val);
-                    break;
+    // For state-changing requests via Cookie auth, require Origin/Referer check (CSRF mitigation)
+    // Bearer tokens are immune since they must be explicitly attached by JS
+    if token_opt.is_some() && !is_bearer_auth {
+        // Cookie-based auth — check for CSRF on mutating methods
+        let method = request.method().clone();
+        if method == axum::http::Method::POST
+            || method == axum::http::Method::PUT
+            || method == axum::http::Method::DELETE
+            || method == axum::http::Method::PATCH
+        {
+            let origin = request.headers().get(header::ORIGIN)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string());
+            let referer = request.headers().get(header::REFERER)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string());
+            let host = request.headers().get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string());
+
+            // 如果有 Origin header，驗證它是否匹配 Host
+            if let Some(ref origin_val) = origin {
+                if let Some(ref host_val) = host {
+                    // 從 Origin 中提取主機名
+                    let origin_host = origin_val
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://");
+                    if !origin_host.starts_with(host_val.as_str()) {
+                        tracing::warn!("CSRF check failed: Origin '{}' does not match Host '{}'", origin_val, host_val);
+                        return Err(StatusCode::FORBIDDEN);
+                    }
                 }
+            } else if referer.is_none() {
+                // 既沒有 Origin 也沒有 Referer — 可疑的跨站請求
+                // 但為了相容性（某些合法客戶端可能不帶這些 header），僅記錄警告
+                tracing::debug!("Cookie-based mutating request without Origin or Referer header");
             }
         }
     }
 
     let token = if let Some(t) = token_opt { t } else { return Err(StatusCode::UNAUTHORIZED) };
 
-    match verify_token(&token) {
+    // 使用 AppState 中的 jwt_secret 驗證 token（避免每次讀取 env var）
+    match verify_token_with_secret(&token, &state.jwt_secret) {
         Ok(claims) => {
             let mut request = request;
             let user_id = claims.sub.parse::<i64>().map_err(|_| StatusCode::UNAUTHORIZED)?;

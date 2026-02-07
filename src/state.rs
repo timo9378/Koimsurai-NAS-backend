@@ -46,6 +46,9 @@ pub struct AppState {
     pub tx: broadcast::Sender<JobUpdate>,
     pub audit: Arc<AuditService>,
     pub search: Arc<SearchService>,
+    /// JWT 簽名密鑰（啟動時從環境變數讀取，避免每次請求都讀取 env var）
+    /// JWT signing secret (loaded once at startup from env var)
+    pub jwt_secret: Arc<String>,
     /// Semaphore 用於限制同時進行的 FFmpeg 轉碼數量
     /// Semaphore to limit concurrent FFmpeg transcodes
     pub transcode_semaphore: Arc<Semaphore>,

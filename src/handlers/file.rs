@@ -145,9 +145,13 @@ pub async fn rename_file(
     fs::rename(old_path, new_path).await.map_err(AppError::from)?;
 
     // 更新資料庫中的路徑（files、file_tags、file_stars、permissions、share_links、AI tables）
+    // 使用 Transaction 確保原子性：所有更新要麼全成功，要麼全回滾
     // Normalize paths stored in DB (no leading slash)
     let normalized_old = path.replace('\\', "/").trim_start_matches('/').to_string();
     let normalized_new = payload.new_path.replace('\\', "/").trim_start_matches('/').to_string();
+
+    // 開始事務
+    let mut tx = state.pool.begin().await.map_err(AppError::from)?;
 
     // 查出所有受影響的 files 路徑（包含目標本身與子路徑）
     let like_pattern = format!("{}/%", normalized_old);
@@ -156,7 +160,7 @@ pub async fn rename_file(
     )
     .bind(&normalized_old)
     .bind(&like_pattern)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(AppError::from)?;
 
@@ -172,56 +176,66 @@ pub async fn rename_file(
             .unwrap_or_default();
 
         // 更新 files
-        let _ = sqlx::query(
+        sqlx::query(
             "UPDATE files SET path = ?, parent_path = ?, name = ? WHERE path = ?"
         )
         .bind(&new_db_path)
         .bind(&new_parent)
         .bind(&new_name)
         .bind(&old_db_path)
-        .execute(&state.pool)
-        .await;
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::from)?;
 
         // 更新 file_tags
-        let _ = sqlx::query("UPDATE file_tags SET file_path = ? WHERE file_path = ?")
+        sqlx::query("UPDATE file_tags SET file_path = ? WHERE file_path = ?")
             .bind(&new_db_path)
             .bind(&old_db_path)
-            .execute(&state.pool)
-            .await;
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
 
         // 更新 file_stars
-        let _ = sqlx::query("UPDATE file_stars SET file_path = ? WHERE file_path = ?")
+        sqlx::query("UPDATE file_stars SET file_path = ? WHERE file_path = ?")
             .bind(&new_db_path)
             .bind(&old_db_path)
-            .execute(&state.pool)
-            .await;
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
 
         // 更新 permissions
-        let _ = sqlx::query("UPDATE permissions SET file_path = ? WHERE file_path = ?")
+        sqlx::query("UPDATE permissions SET path = ? WHERE path = ?")
             .bind(&new_db_path)
             .bind(&old_db_path)
-            .execute(&state.pool)
-            .await;
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
 
         // 更新 share_links
-        let _ = sqlx::query("UPDATE share_links SET file_path = ? WHERE file_path = ?")
+        sqlx::query("UPDATE share_links SET file_path = ? WHERE file_path = ?")
             .bind(&new_db_path)
             .bind(&old_db_path)
-            .execute(&state.pool)
-            .await;
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
 
         // 更新 AI 相關表格
-        let _ = sqlx::query("UPDATE image_ai_tags SET file_path = ? WHERE file_path = ?")
+        sqlx::query("UPDATE image_ai_tags SET file_path = ? WHERE file_path = ?")
             .bind(&new_db_path)
             .bind(&old_db_path)
-            .execute(&state.pool)
-            .await;
-        let _ = sqlx::query("UPDATE ai_analysis_status SET file_path = ? WHERE file_path = ?")
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
+        sqlx::query("UPDATE ai_analysis_status SET file_path = ? WHERE file_path = ?")
             .bind(&new_db_path)
             .bind(&old_db_path)
-            .execute(&state.pool)
-            .await;
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
     }
+
+    // 提交事務：所有更新成功才會寫入
+    tx.commit().await.map_err(AppError::from)?;
 
     // Audit Log
     let _ = state.audit.log(
@@ -342,7 +356,7 @@ pub async fn list_files(
     // Sorting
     let sort_column = match query.sort_by.as_deref() {
         Some("size") => "size",
-        Some("modified") => "modified",
+        Some("modified") | Some("date") => "modified",
         _ => "name", // Default sort by name
     };
     
@@ -735,6 +749,63 @@ pub async fn get_thumbnail(
     }
 }
 
+/// 將檔案移動到垃圾桶的共用邏輯
+/// Shared utility: move a file/directory to the .trash folder and record metadata
+pub async fn move_to_trash(
+    storage_path: &std::path::Path,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    file_path: &str,
+    user_id: i64,
+) -> Result<String, AppError> {
+    let full_path = validate_path(storage_path, file_path)?;
+    
+    if !full_path.exists() {
+        return Err(AppError::Status(StatusCode::NOT_FOUND));
+    }
+
+    let trash_root = storage_path.join(".trash");
+    if !trash_root.exists() {
+        fs::create_dir_all(&trash_root).await.map_err(AppError::from)?;
+    }
+
+    // Flatten trash structure: move directly to trash root
+    let file_name = full_path.file_name().unwrap_or_default().to_string_lossy();
+    let trash_path = trash_root.join(file_name.as_ref());
+    
+    // Handle collision by appending timestamp
+    let (final_trash_path, trash_name) = if trash_path.exists() {
+        let timestamp = chrono::Utc::now().timestamp();
+        let new_name = format!("{}.{}", file_name, timestamp);
+        (trash_root.join(&new_name), new_name)
+    } else {
+        (trash_path, file_name.to_string())
+    };
+
+    fs::rename(&full_path, &final_trash_path).await.map_err(AppError::from)?;
+
+    // Record original path in trash_metadata for correct restore
+    let normalized_path = file_path.replace('\\', "/");
+    let _ = sqlx::query(
+        "INSERT OR REPLACE INTO trash_metadata (trash_name, original_path, deleted_by) VALUES (?, ?, ?)"
+    )
+    .bind(&trash_name)
+    .bind(&normalized_path)
+    .bind(user_id)
+    .execute(pool)
+    .await;
+
+    // 從 files 資料表移除記錄
+    // Remove from files table (including children if it's a directory)
+    sqlx::query("DELETE FROM files WHERE path = ? OR path LIKE ?")
+        .bind(&normalized_path)
+        .bind(format!("{}/%", normalized_path))
+        .execute(pool)
+        .await
+        .map_err(AppError::from)?;
+
+    Ok(trash_name)
+}
+
 #[utoipa::path(
     delete,
     path = "/api/files/{path}",
@@ -766,53 +837,7 @@ pub async fn delete_file(
         }
     }
 
-    let full_path = validate_path(&state.storage_path, &path)?;
-    
-    if !full_path.exists() {
-        return Err(AppError::Status(StatusCode::NOT_FOUND));
-    }
-
-    let trash_root = state.storage_path.join(".trash");
-    if !trash_root.exists() {
-        fs::create_dir_all(&trash_root).await.map_err(AppError::from)?;
-    }
-
-    // Flatten trash structure: move directly to trash root
-    // Don't maintain directory structure as restore currently assumes flat structure
-    let file_name = full_path.file_name().unwrap_or_default().to_string_lossy();
-    let trash_path = trash_root.join(file_name.as_ref());
-    
-    // Handle collision by appending timestamp
-    let (final_trash_path, trash_name) = if trash_path.exists() {
-        let timestamp = chrono::Utc::now().timestamp();
-        let new_name = format!("{}.{}", file_name, timestamp);
-        (trash_root.join(&new_name), new_name)
-    } else {
-        (trash_path, file_name.to_string())
-    };
-
-    fs::rename(full_path, &final_trash_path).await.map_err(AppError::from)?;
-
-    // Record original path in trash_metadata for correct restore
-    let normalized_path = path.replace('\\', "/");
-    let _ = sqlx::query(
-        "INSERT OR REPLACE INTO trash_metadata (trash_name, original_path, deleted_by) VALUES (?, ?, ?)"
-    )
-    .bind(&trash_name)
-    .bind(&normalized_path)
-    .bind(user_id)
-    .execute(&state.pool)
-    .await;
-
-    // === 從 files 資料表移除記錄 ===
-    // Remove from files table
-    sqlx::query("DELETE FROM files WHERE path = ? OR path LIKE ?")
-        .bind(&normalized_path)
-        .bind(format!("{}/%", normalized_path)) // 如果是目錄，一併刪除子項目
-        .execute(&state.pool)
-        .await
-        .map_err(AppError::from)?;
-    // ================================
+    move_to_trash(&state.storage_path, &state.pool, &path, user_id).await?;
 
     // Audit Log
     let _ = state.audit.log(
@@ -842,50 +867,15 @@ pub struct BatchOperationRequest {
 )]
 pub async fn batch_delete(
     State(state): State<AppState>,
+    Extension(user_id): Extension<i64>,
     Json(payload): Json<BatchOperationRequest>,
 ) -> Result<StatusCode, AppError> {
     for path in payload.paths {
-        // Reuse existing delete logic or enqueue job
-        // For simplicity, we'll reuse the logic but ideally this should be a background job
-        let full_path = validate_path(&state.storage_path, &path)?;
-        
-        if !full_path.exists() {
+        if let Err(e) = move_to_trash(&state.storage_path, &state.pool, &path, user_id).await {
+            tracing::error!("Failed to move '{}' to trash: {:?}", path, e);
+            // Continue with remaining files instead of aborting
             continue;
         }
-
-        let trash_root = state.storage_path.join(".trash");
-        if !trash_root.exists() {
-            fs::create_dir_all(&trash_root).await.map_err(AppError::from)?;
-        }
-
-        // Flatten trash structure: move directly to trash root
-        let file_name = full_path.file_name().unwrap_or_default().to_string_lossy();
-        let trash_path = trash_root.join(file_name.as_ref());
-        
-        // Handle collision by appending timestamp
-        let (final_trash_path, trash_name) = if trash_path.exists() {
-            let timestamp = chrono::Utc::now().timestamp();
-            let new_name = format!("{}.{}", file_name, timestamp);
-            (trash_root.join(&new_name), new_name)
-        } else {
-            (trash_path, file_name.to_string())
-        };
-
-        if let Err(e) = fs::rename(&full_path, &final_trash_path).await {
-            tracing::error!("Failed to move file to trash: {}", e);
-            continue;
-        }
-
-        // Record original path in trash_metadata
-        let normalized_path = path.replace('\\', "/");
-        let _ = sqlx::query(
-            "INSERT OR REPLACE INTO trash_metadata (trash_name, original_path, deleted_by) VALUES (?, ?, ?)"
-        )
-        .bind(&trash_name)
-        .bind(&normalized_path)
-        .bind(0i64) // batch_delete doesn't have user_id Extension yet
-        .execute(&state.pool)
-        .await;
     }
 
     Ok(StatusCode::OK)

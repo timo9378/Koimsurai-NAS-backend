@@ -12,6 +12,7 @@ pub mod services;
 
 use std::sync::Arc;
 use std::path::PathBuf;
+use std::env;
 use dav_server::{localfs::LocalFs, DavHandler};
 use tokio::sync::Semaphore;
 use crate::state::{AppState, get_max_concurrent_transcodes, get_docker_enabled, get_ai_enabled};
@@ -123,6 +124,11 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
     );
     crate::utils::cleanup::spawn_hls_cleanup_task(hls_cache_dir, hls_max_age, hls_cleanup_interval);
 
+    // JWT secret — 啟動時讀取一次，避免每次請求都讀 env var
+    let jwt_secret = Arc::new(
+        env::var("JWT_SECRET").expect("JWT_SECRET must be set (checked in main.rs)")
+    );
+
     let state = AppState {
         pool,
         storage_path,
@@ -131,6 +137,7 @@ pub async fn create_app(pool: SqlitePool, storage_path: PathBuf) -> axum::Router
         tx,
         audit,
         search,
+        jwt_secret,
         transcode_semaphore,
         docker_service,
         ai_service,

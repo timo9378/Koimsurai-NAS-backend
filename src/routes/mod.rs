@@ -147,7 +147,7 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/audit/logs/:id", axum::routing::delete(audit::delete_audit_log))
         .route("/search", get(search::search_files))
         .route("/search/ai-tags", get(search::search_ai_tags))
-        .layer(middleware::from_fn(require_auth)) // Protect file routes
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth)) // Protect file routes
         // 設置上傳大小限制為 10GB
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10GB
 
@@ -170,7 +170,7 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/images/:id", delete(docker::remove_image))
         // 網絡操作
         .route("/networks", get(docker::list_networks))
-        .layer(middleware::from_fn(require_auth)); // Protect docker routes
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth)); // Protect docker routes
 
 
 

@@ -7,7 +7,7 @@ use axum_extra::extract::cookie::{Cookie, SameSite, CookieJar};
 use crate::models::{RegisterRequest, LoginRequest, User, EmptyResponse, RefreshToken};
 use crate::state::AppState;
 use crate::utils::hash::{hash_password, verify_password};
-use crate::utils::jwt::create_access_token;
+use crate::utils::jwt::create_access_token_with_secret;
 use crate::error::AppError;
 use uuid::Uuid;
 use chrono::{Utc, Duration};
@@ -123,7 +123,8 @@ pub async fn login(
     }
 
     // 生成 Access Token
-    let access_token = create_access_token(user.id).map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    let access_token = create_access_token_with_secret(user.id, &state.jwt_secret)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;;
 
     // 生成 Refresh Token
     let refresh_token = Uuid::new_v4().to_string();
@@ -215,7 +216,8 @@ pub async fn refresh(
     };
 
     // 生成新的 Access Token
-    let access_token = create_access_token(token_record.user_id).map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    let access_token = create_access_token_with_secret(token_record.user_id, &state.jwt_secret)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     // 選擇性：輪換 Refresh Token (這裡為了簡單起見，我們保留原來的 Refresh Token，或者你可以選擇發一個新的並撤銷舊的)
     // 這裡我們選擇發一個新的 Refresh Token 並撤銷舊的，以增加安全性 (Refresh Token Rotation)

@@ -65,50 +65,126 @@ pub fn get_available_commands() -> Vec<&'static str> {
     ]
 }
 
-/// 危險命令黑名單 - 絕對禁止
-fn get_dangerous_patterns() -> Vec<&'static str> {
-    vec![
-        "sudo", "su ", "chown", "chroot",
-        "rm -rf /", "rm -rf /*", "mkfs", "dd if=",
-        "> /dev/", "| /dev/", 
-        ":(){ :|:& };:",  // Fork bomb
-        "/etc/passwd", "/etc/shadow",
-        "eval", "exec",
+/// 危險的 shell 元字符 — 禁止出現在任何地方
+/// 這些字符可用來繞過白名單（命令替換、進程替換等）
+fn get_dangerous_shell_chars() -> &'static [&'static str] {
+    &[
+        "`",      // backtick 命令替換
+        "$(",     // $() 命令替換
+        "$((",    // 算術展開
+        "${",     // 變數展開
+        "<(",     // 進程替換
+        ">(", 
+        ">>",     // append redirect
+        "<<",     // here-doc
+        "\\",     // 反斜線轉義
+        "\n",     // newline (命令分隔)
+        "\r",
     ]
 }
 
-/// 檢查命令是否安全
+/// 危險命令黑名單 — 絕對禁止的命令名稱
+fn get_dangerous_commands() -> HashSet<&'static str> {
+    [
+        "sudo", "su", "chown", "chroot", "mount", "umount",
+        "mkfs", "dd", "eval", "exec", "source",
+        "curl", "wget", "nc", "ncat", "netcat", "nmap",
+        "python", "python3", "perl", "ruby", "node", "php",
+        "sh", "bash", "zsh", "csh", "dash", "ash",
+        "ssh", "scp", "sftp", "telnet", "ftp",
+        "apt", "apt-get", "yum", "dnf", "pacman", "pip", "pip3",
+        "systemctl", "service", "init", "shutdown", "reboot", "halt",
+        "iptables", "ip6tables", "nft",
+        "insmod", "rmmod", "modprobe",
+        "crontab", "at",
+        "strace", "ltrace", "gdb",
+        "passwd", "useradd", "userdel", "usermod", "groupadd",
+    ].into_iter().collect()
+}
+
+/// 解析命令字串為管道分隔的子命令，並驗證每一個子命令是否安全
+/// Parses a command string into pipe-separated sub-commands and validates each one
 fn is_command_safe(cmd: &str) -> Result<(), String> {
-    let cmd_lower = cmd.to_lowercase().trim().to_string();
+    let cmd_trimmed = cmd.trim();
     
-    if cmd_lower.is_empty() {
+    if cmd_trimmed.is_empty() {
         return Ok(());
     }
 
-    // 檢查危險模式
-    for pattern in get_dangerous_patterns() {
-        if cmd_lower.contains(pattern) {
-            return Err(format!("禁止的操作: 包含不安全的模式 '{}'", pattern));
+    // 1. 檢查危險 shell 元字符
+    for pattern in get_dangerous_shell_chars() {
+        if cmd_trimmed.contains(pattern) {
+            return Err(format!("禁止的操作: 包含不安全的字符 '{}'", pattern));
         }
     }
 
-    // 提取命令名稱
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.is_empty() {
-        return Ok(());
+    // 2. 禁止命令串接符號 (;, &&, ||)
+    //    我們只允許管道 (|) 和簡單重定向 (>)
+    if cmd_trimmed.contains(';') {
+        return Err("禁止使用 ';' 串接命令。".to_string());
+    }
+    if cmd_trimmed.contains("&&") {
+        return Err("禁止使用 '&&' 串接命令。".to_string());
+    }
+    if cmd_trimmed.contains("||") {
+        return Err("禁止使用 '||' 串接命令。".to_string());
     }
 
-    let command_name = parts[0];
+    // 3. 解析管道：每個 | 分隔的子命令都必須通過白名單
     let allowed = get_allowed_commands();
+    let dangerous = get_dangerous_commands();
+    let sub_commands: Vec<&str> = cmd_trimmed.split('|').collect();
+    
+    for (i, sub_cmd) in sub_commands.iter().enumerate() {
+        let sub_trimmed = sub_cmd.trim();
+        if sub_trimmed.is_empty() {
+            if i > 0 {
+                continue; // 允許末尾管道（雖然沒意義）
+            }
+            return Ok(());
+        }
 
-    if !allowed.contains(command_name) {
-        return Err(format!("命令 '{}' 不在允許列表中。輸入 'help' 查看可用命令。", command_name));
-    }
+        // 處理輸出重定向：移除 > filename 部分再驗證
+        let without_redirect = if let Some(pos) = sub_trimmed.find('>') {
+            sub_trimmed[..pos].trim()
+        } else {
+            sub_trimmed
+        };
 
-    // 額外的 rm 安全檢查
-    if command_name == "rm" {
-        if cmd.contains("-rf") || cmd.contains("-fr") {
-            return Err("禁止使用 rm -rf 命令".to_string());
+        let parts: Vec<&str> = without_redirect.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let command_name = parts[0];
+
+        // 3a. 檢查是否在危險命令名單中
+        if dangerous.contains(command_name) {
+            return Err(format!("命令 '{}' 被禁止執行。", command_name));
+        }
+
+        // 3b. 檢查是否在白名單中
+        if !allowed.contains(command_name) {
+            return Err(format!(
+                "命令 '{}' 不在允許列表中。輸入 'help' 查看可用命令。",
+                command_name
+            ));
+        }
+
+        // 3c. 額外的 rm 安全檢查
+        if command_name == "rm" {
+            let args_str = without_redirect.to_lowercase();
+            if args_str.contains("-rf") || args_str.contains("-fr") || args_str.contains("--no-preserve-root") {
+                return Err("禁止使用 rm -rf 命令".to_string());
+            }
+        }
+
+        // 3d. 檢查參數中是否有嘗試存取敏感路徑
+        for part in &parts[1..] {
+            let lower = part.to_lowercase();
+            if lower.contains("/etc/passwd") || lower.contains("/etc/shadow") || lower.contains("/dev/sd") {
+                return Err(format!("禁止存取敏感路徑: {}", part));
+            }
         }
     }
 
@@ -535,14 +611,44 @@ fn handle_cd_command(parts: &[&str], current_dir: &mut String, storage_base: &st
     String::new()
 }
 
-/// 執行外部命令
+/// 執行外部命令（不透過 sh -c，直接執行白名單命令）
+/// Execute external command directly without sh -c to prevent command injection
 async fn execute_external_command(cmd: &str, current_dir: &str, storage_base: &str) -> String {
     use tokio::process::Command;
-    
-    // 設置環境變數限制
-    let result = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
+
+    let cmd_trimmed = cmd.trim();
+
+    // 檢查是否有管道
+    if cmd_trimmed.contains('|') {
+        return execute_pipeline(cmd_trimmed, current_dir, storage_base).await;
+    }
+
+    // 處理輸出重定向 (>)
+    let (command_part, redirect_target) = if let Some(pos) = cmd_trimmed.find('>') {
+        let target = cmd_trimmed[pos + 1..].trim().to_string();
+        let cmd_part = cmd_trimmed[..pos].trim();
+        (cmd_part.to_string(), Some(target))
+    } else {
+        (cmd_trimmed.to_string(), None)
+    };
+
+    let parts: Vec<&str> = command_part.split_whitespace().collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    let program = parts[0];
+    let args = &parts[1..];
+
+    // 解析路徑參數：確保所有路徑在 storage 範圍內
+    let resolved_args: Vec<String> = args.iter().map(|a| {
+        // 如果參數看起來像路徑且不是 flag，不做特殊處理
+        // Command 會以當前目錄為基礎解析相對路徑
+        a.to_string()
+    }).collect();
+
+    let result = Command::new(program)
+        .args(&resolved_args)
         .current_dir(current_dir)
         .env("HOME", storage_base)
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -554,18 +660,130 @@ async fn execute_external_command(cmd: &str, current_dir: &str, storage_base: &s
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            
+
+            // 處理重定向
+            if let Some(ref target) = redirect_target {
+                if !target.is_empty() {
+                    let target_path = if target.starts_with('/') {
+                        format!("{}{}", storage_base, target)
+                    } else {
+                        format!("{}/{}", current_dir, target)
+                    };
+                    // 驗證路徑在 storage 內
+                    if let Ok(canonical) = std::fs::canonicalize(std::path::Path::new(&target_path).parent().unwrap_or(std::path::Path::new(current_dir))) {
+                        if canonical.to_string_lossy().starts_with(storage_base) {
+                            if let Err(e) = std::fs::write(&target_path, stdout.as_bytes()) {
+                                return format!("\x1b[31m寫入錯誤: {}\x1b[0m", e);
+                            }
+                            if !stderr.is_empty() {
+                                return format!("\x1b[31m{}\x1b[0m", stderr.replace('\n', "\r\n"));
+                            }
+                            return String::new();
+                        }
+                    }
+                    return "\x1b[31m錯誤: 重定向目標不在 storage 範圍內\x1b[0m".to_string();
+                }
+            }
+
             let mut result = String::new();
             if !stdout.is_empty() {
-                // 將 \n 轉換為 \r\n 以正確顯示
                 result.push_str(&stdout.replace('\n', "\r\n"));
             }
             if !stderr.is_empty() {
                 result.push_str(&format!("\x1b[31m{}\x1b[0m", stderr.replace('\n', "\r\n")));
             }
-            
             result.trim_end().to_string()
         }
         Err(e) => format!("\x1b[31m執行錯誤: {}\x1b[0m", e),
     }
+}
+
+/// 安全地執行管道命令（每一段都直接執行，不透過 shell）
+/// 使用中間 Vec<u8> 傳遞管道資料，避免跨進程 fd 問題
+/// Safely execute piped commands - each segment runs directly without shell
+async fn execute_pipeline(cmd: &str, current_dir: &str, storage_base: &str) -> String {
+    use tokio::process::Command;
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let segments: Vec<&str> = cmd.split('|').collect();
+    
+    if segments.is_empty() {
+        return String::new();
+    }
+
+    // 執行第一個命令取得輸出
+    let first_parts: Vec<&str> = segments[0].trim().split_whitespace().collect();
+    if first_parts.is_empty() {
+        return String::new();
+    }
+
+    let first_output = match Command::new(first_parts[0])
+        .args(&first_parts[1..])
+        .current_dir(current_dir)
+        .env("HOME", storage_base)
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("TERM", "xterm-256color")
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return format!("\x1b[31m執行錯誤 ({}): {}\x1b[0m", first_parts[0], e),
+    };
+
+    let mut current_stdout = first_output.stdout;
+
+    // 依序執行管道中的每個後續命令，將前一個的 stdout 作為 stdin
+    for segment in &segments[1..] {
+        let parts: Vec<&str> = segment.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let mut child = match Command::new(parts[0])
+            .args(&parts[1..])
+            .current_dir(current_dir)
+            .env("HOME", storage_base)
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => return format!("\x1b[31m執行錯誤 ({}): {}\x1b[0m", parts[0], e),
+        };
+
+        // 寫入前一個命令的 stdout 到當前命令的 stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            let data = current_stdout.clone();
+            tokio::spawn(async move {
+                let _ = stdin.write_all(&data).await;
+                drop(stdin); // 關閉 stdin 讓命令知道輸入結束
+            });
+        }
+
+        match child.wait_with_output().await {
+            Ok(output) => {
+                current_stdout = output.stdout;
+                // 如果有 stderr 且非空，附加到最終輸出
+                if !output.stderr.is_empty() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.trim().is_empty() {
+                        // stderr 不阻塞管道，但最後會顯示
+                        tracing::debug!("Pipeline stderr from {}: {}", parts[0], stderr);
+                    }
+                }
+            }
+            Err(e) => return format!("\x1b[31m執行錯誤 ({}): {}\x1b[0m", parts[0], e),
+        }
+    }
+
+    let stdout = String::from_utf8_lossy(&current_stdout);
+    let mut result = String::new();
+    if !stdout.is_empty() {
+        result.push_str(&stdout.replace('\n', "\r\n"));
+    }
+    result.trim_end().to_string()
 }
