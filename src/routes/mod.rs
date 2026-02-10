@@ -188,7 +188,11 @@ pub async fn create_router(state: AppState) -> Router {
         .nest("/api/docker", docker_routes)
         .route("/api/share/:id/download", get(share::access_share_link)) // Public share link - download
         .route("/api/share/:id/info", get(share::get_share_info)) // Public share link - info
-        .route("/api/upload-link/:id/upload", post(upload_link::upload_via_link)) // Public upload link - upload
+        .merge(
+            Router::new()
+                .route("/api/upload-link/:id/upload", post(upload_link::upload_via_link))
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10GB for public uploads
+        )
         .route("/api/upload-link/:id/info", get(upload_link::get_upload_link_info)) // Public upload link - info
         .route("/webdav", any(webdav::webdav_handler))
         .route("/webdav/*path", any(webdav::webdav_handler))

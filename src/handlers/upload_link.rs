@@ -186,21 +186,35 @@ pub async fn upload_via_link(
     }
 
     let mut files_uploaded = 0;
+    let mut pending_relative_path: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|_| AppError::Status(StatusCode::BAD_REQUEST))? {
-        let file_name = field.file_name()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("upload_{}", Uuid::new_v4()));
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!("Multipart field error: {:?}", e);
+        AppError::Status(StatusCode::BAD_REQUEST)
+    })? {
+        let field_name = field.name().unwrap_or("").to_string();
 
-        // 讀取檔案內容
-        let data = field.bytes().await.map_err(|_| AppError::Status(StatusCode::BAD_REQUEST))?;
-
-        // 檢查檔案大小限制
-        if let Some(max_size) = max_file_size {
-            if data.len() as i64 > max_size {
-                return Err(AppError::Status(StatusCode::PAYLOAD_TOO_LARGE));
-            }
+        // Handle relative_path text field (sent before each file for folder uploads)
+        if field_name == "relative_path" {
+            pending_relative_path = field.text().await.ok();
+            continue;
         }
+
+        // Determine the save path: use relative_path if provided, else just file_name
+        let save_name = if let Some(ref rel_path) = pending_relative_path {
+            // Sanitize relative path to prevent path traversal
+            rel_path
+                .replace('\\', "/")
+                .split('/')
+                .filter(|s| !s.is_empty() && *s != ".." && *s != ".")
+                .collect::<Vec<_>>()
+                .join("/")
+        } else {
+            field.file_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("upload_{}", Uuid::new_v4()))
+        };
+        pending_relative_path = None; // Reset for next iteration
 
         // 建構完整路徑
         let clean_target = if target_path.starts_with('/') {
@@ -208,17 +222,35 @@ pub async fn upload_via_link(
         } else {
             &target_path
         };
-        
-        let full_path = state.storage_path.join(clean_target).join(&file_name);
+
+        let full_path = state.storage_path.join(clean_target).join(&save_name);
 
         // 確保目標目錄存在
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).await.map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
         }
 
-        // 寫入檔案
+        // 串流寫入檔案（避免將整個檔案載入記憶體）
         let mut file = fs::File::create(&full_path).await.map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
-        file.write_all(&data).await.map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let mut total_bytes: i64 = 0;
+
+        while let Some(chunk) = field.chunk().await.map_err(|e| {
+            tracing::error!("Chunk read error: {:?}", e);
+            AppError::Status(StatusCode::BAD_REQUEST)
+        })? {
+            total_bytes += chunk.len() as i64;
+
+            // 檢查檔案大小限制
+            if let Some(max_size) = max_file_size {
+                if total_bytes > max_size {
+                    drop(file);
+                    let _ = fs::remove_file(&full_path).await;
+                    return Err(AppError::Status(StatusCode::PAYLOAD_TOO_LARGE));
+                }
+            }
+
+            file.write_all(&chunk).await.map_err(|_| AppError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+        }
 
         files_uploaded += 1;
     }

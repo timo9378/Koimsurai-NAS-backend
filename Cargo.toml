@@ -42,6 +42,7 @@ tantivy = "0.25.0"
 sha2 = "0.10.9"
 urlencoding = "2.1.3"
 bollard = "0.19.4"
+zip = "2"
 
 # AI/ML 依賴 (CLIP 模型推理)
 candle-core = { version = "0.8", optional = true }

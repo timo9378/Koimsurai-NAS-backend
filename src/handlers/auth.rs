@@ -303,16 +303,20 @@ pub async fn logout(
     }
 
     // 移除 Cookie
-    // Determine cookie `secure` flag from environment (default true).
+    // Determine cookie settings from environment (must match login cookie attributes)
     let cookie_secure = std::env::var("COOKIE_SECURE").unwrap_or_else(|_| "true".to_string()) == "true";
+    let cookie_domain = std::env::var("COOKIE_DOMAIN").ok();
 
     let mut refresh_cookie_builder = Cookie::build((REFRESH_TOKEN_COOKIE_NAME, ""))
         .http_only(true)
         .path("/")
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(0)); // 立即過期
     if cookie_secure {
         refresh_cookie_builder = refresh_cookie_builder.secure(true);
+    }
+    if let Some(ref domain) = cookie_domain {
+        refresh_cookie_builder = refresh_cookie_builder.domain(domain.clone());
     }
     let refresh_cookie = refresh_cookie_builder.build();
 
@@ -320,10 +324,13 @@ pub async fn logout(
     let mut access_cookie_builder = Cookie::build((ACCESS_TOKEN_COOKIE_NAME, ""))
         .http_only(true)
         .path("/")
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(0));
     if cookie_secure {
         access_cookie_builder = access_cookie_builder.secure(true);
+    }
+    if let Some(ref domain) = cookie_domain {
+        access_cookie_builder = access_cookie_builder.domain(domain.clone());
     }
     let access_cookie = access_cookie_builder.build();
 
