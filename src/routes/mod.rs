@@ -16,7 +16,7 @@ use crate::middleware::auth::require_auth;
 
 
 
-use crate::models::{RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, InitUploadRequest, InitUploadResponse, UploadSession, Tag};
+use crate::models::{RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, InitUploadRequest, InitUploadResponse, UploadSession, Tag, LoginResponse, TwoFactorLoginRequest, TwoFactorSetupResponse, TwoFactorVerifySetupRequest, TwoFactorVerifySetupResponse, TwoFactorDisableRequest, TwoFactorStatusResponse};
 use crate::handlers::tag::AddTagRequest;
 use crate::services::audit::AuditLog;
 use crate::utils::versioning::FileVersion;
@@ -31,6 +31,11 @@ use crate::handlers::media::TimelineGroup;
         auth::login,
         auth::logout,
         auth::refresh,
+        auth::two_factor_login,
+        auth::two_factor_setup,
+        auth::two_factor_verify_setup,
+        auth::two_factor_disable,
+        auth::two_factor_status,
         file::list_files_root,
         file::list_files,
         file::list_favorites,
@@ -70,7 +75,7 @@ use crate::handlers::media::TimelineGroup;
         media::get_timeline
     ),
     components(
-        schemas(RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo, crate::handlers::file::CreateFolderRequest, crate::handlers::tag::UserTag, crate::handlers::tag::TaggedFile)
+        schemas(RegisterRequest, LoginRequest, EmptyResponse, FileInfo, User, CreateShareLinkRequest, ShareLinkResponse, SystemStatus, DiskInfo, ConsistencyCheckResult, RescanResult, InitUploadRequest, InitUploadResponse, UploadSession, Tag, AddTagRequest, AuditLog, FileVersion, SearchResult, TimelineGroup, LoginResponse, TwoFactorLoginRequest, TwoFactorSetupResponse, TwoFactorVerifySetupRequest, TwoFactorVerifySetupResponse, TwoFactorDisableRequest, TwoFactorStatusResponse, crate::handlers::file::BatchOperationRequest, crate::handlers::file::FavoriteFileInfo, crate::handlers::file::CreateFolderRequest, crate::handlers::tag::UserTag, crate::handlers::tag::TaggedFile)
     ),
     tags(
         (name = "auth", description = "Authentication endpoints"),
@@ -93,11 +98,21 @@ pub async fn create_router(state: AppState) -> Router {
         .with_secure(false) // Set to true in production with HTTPS
         .with_expiry(Expiry::OnInactivity(tower_sessions::cookie::time::Duration::seconds(3600)));
 
+    // 2FA routes 需要登入（require_auth），而 /2fa/login 是公開的（用 temp_token）
+    let two_factor_protected = Router::new()
+        .route("/2fa/setup", post(auth::two_factor_setup))
+        .route("/2fa/verify-setup", post(auth::two_factor_verify_setup))
+        .route("/2fa/disable", post(auth::two_factor_disable))
+        .route("/2fa/status", get(auth::two_factor_status))
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
     let auth_routes = Router::new()
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
         .route("/logout", post(auth::logout))
-        .route("/refresh", post(auth::refresh));
+        .route("/refresh", post(auth::refresh))
+        .route("/2fa/login", post(auth::two_factor_login))
+        .merge(two_factor_protected);
 
     let file_routes = Router::new()
         .route("/files", get(file::list_files_root))

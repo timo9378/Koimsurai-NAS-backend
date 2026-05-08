@@ -328,6 +328,39 @@ pub async fn init_db(database_url: Option<String>) -> Result<Pool<Sqlite>> {
     .execute(&pool)
     .await?;
 
+    // ── Idempotent ALTER TABLE 區（schema 演進；新部署、舊 DB 都安全）──
+    // 2FA / TOTP 欄位（CVE-2026-31431 防護的縱深之一）
+    ensure_column(&pool, "users", "totp_secret", "TEXT").await?;
+    ensure_column(&pool, "users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0").await?;
+    ensure_column(&pool, "users", "totp_backup_codes", "TEXT").await?;
+
     println!("Database initialized successfully");
     Ok(pool)
+}
+
+/// 加 column 但確保 idempotent：先檢查存在才 alter，避免重新部署時 duplicate column error
+async fn ensure_column(
+    pool: &Pool<Sqlite>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let row: (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = ?",
+        table
+    ))
+    .bind(column)
+    .fetch_one(pool)
+    .await?;
+
+    if row.0 == 0 {
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            table, column, definition
+        ))
+        .execute(pool)
+        .await?;
+        info!("Schema: added {}.{}", table, column);
+    }
+    Ok(())
 }
