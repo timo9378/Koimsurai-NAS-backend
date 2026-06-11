@@ -211,6 +211,8 @@ pub async fn create_router(state: AppState) -> Router {
         .route("/api/upload-link/:id/info", get(upload_link::get_upload_link_info)) // Public upload link - info
         .route("/webdav", any(webdav::webdav_handler))
         .route("/webdav/*path", any(webdav::webdav_handler))
+        // Public health check for uptime monitoring (no auth, returns 200)
+        .route("/health", get(|| async { "OK" }))
         .layer(cors)
         .layer(session_layer)
         .with_state(state)
