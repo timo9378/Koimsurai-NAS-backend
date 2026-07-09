@@ -1,6 +1,6 @@
 use axum::{Json, extract::State};
 use sysinfo::{System, Disks, Components};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use crate::state::AppState;
 use crate::services::indexer::Indexer;
 use std::process::Command;
@@ -16,6 +16,7 @@ pub struct SystemStatus {
     disks: Vec<DiskInfo>,
     gpu: Option<GpuInfo>,
     top_processes: Vec<ProcessInfo>,
+    ups: Option<UpsInfo>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -75,6 +76,34 @@ fn get_gpu_info() -> Option<GpuInfo> {
     } else {
         None
     }
+}
+
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UpsInfo {
+    /// NUT ups.status，例如 "OL"（吃市電）/ "OB"（吃電池）/ "OL CHRG"
+    status: String,
+    /// 是否正常吃市電（OL 且非 OB）
+    online: bool,
+    /// 電池電量 %
+    battery_charge: Option<f32>,
+    /// 剩餘可用秒數
+    battery_runtime: Option<u64>,
+    /// UPS 負載 %
+    ups_load: Option<f32>,
+    /// 輸入（市電）電壓
+    input_voltage: Option<f32>,
+    /// 輸出電壓
+    output_voltage: Option<f32>,
+    /// 機型
+    model: Option<String>,
+    /// 這份資料的時間戳（host 端寫入時間）
+    updated_at: Option<String>,
+}
+
+/// 從 host 端寫入的 /data/ups.json 讀 UPS 狀態（由 ups-log.sh 每分鐘更新）
+fn get_ups_info() -> Option<UpsInfo> {
+    let raw = std::fs::read_to_string("/data/ups.json").ok()?;
+    serde_json::from_str::<UpsInfo>(&raw).ok()
 }
 
 fn get_cpu_temperature() -> Option<f32> {
@@ -257,6 +286,9 @@ pub async fn get_system_status() -> Json<SystemStatus> {
     // Get top processes using ps command (works in container)
     let top_processes = get_top_processes(total_memory);
 
+    // Get UPS status from host-written /data/ups.json (updated by ups-log.sh)
+    let ups = get_ups_info();
+
     Json(SystemStatus {
         cpu_usage,
         cpu_temp,
@@ -267,6 +299,7 @@ pub async fn get_system_status() -> Json<SystemStatus> {
         disks: disk_info,
         gpu,
         top_processes,
+        ups,
     })
 }
 
